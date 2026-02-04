@@ -1,0 +1,36 @@
+.alert {
+  background-color: #eff6ff;
+  border: 1px solid #3b82f6;
+  border-radius: 0.5rem;
+  padding: 1rem;
+  margin-bottom: 1.5rem;
+  display: flex;
+  gap: 0.75rem;
+}
+
+.alertContent {
+  flex: 1;
+}
+
+.alertTitle {
+  font-weight: 600;
+  color: #1e40af;
+  margin: 0 0 0.5rem 0;
+  font-size: 0.938rem;
+}
+
+.requirementsList {
+  margin: 0;
+  padding-left: 1.25rem;
+  color: #1e3a8a;
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+
+.requirementsList li {
+  margin-bottom: 0.375rem;
+}
+
+.requirementsList li strong {
+  color: #1e40af;
+}

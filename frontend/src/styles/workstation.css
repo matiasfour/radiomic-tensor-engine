@@ -1,0 +1,955 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   RADIOMIC TENSORIAL WORKSTATION - Global Styles
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   CSS Variables - Clinical Theme
+   ───────────────────────────────────────────────────────────────────────────── */
+
+:root {
+	/* Primary Colors */
+	--ws-bg-primary: #0f172a;
+	--ws-bg-secondary: #1e293b;
+	--ws-bg-tertiary: #334155;
+	--ws-bg-card: #1e293b;
+	--ws-bg-hover: #374151;
+
+	/* Text Colors */
+	--ws-text-primary: #f8fafc;
+	--ws-text-secondary: #94a3b8;
+	--ws-text-muted: #64748b;
+	--ws-text-accent: #38bdf8;
+
+	/* Border Colors */
+	--ws-border: #334155;
+	--ws-border-light: #475569;
+	--ws-border-accent: #3b82f6;
+
+	/* Status Colors */
+	--ws-success: #22c55e;
+	--ws-warning: #f59e0b;
+	--ws-error: #ef4444;
+	--ws-info: #3b82f6;
+	--ws-processing: #8b5cf6;
+
+	/* Severity Colors */
+	--ws-severity-normal: #22c55e;
+	--ws-severity-mild: #84cc16;
+	--ws-severity-moderate: #f59e0b;
+	--ws-severity-severe: #ef4444;
+	--ws-severity-critical: #7f1d1d;
+
+	/* Modality Colors */
+	--ws-modality-mri: #8b5cf6;
+	--ws-modality-ct: #06b6d4;
+	--ws-modality-tep: #ef4444;
+
+	/* Spacing */
+	--ws-space-xs: 0.25rem;
+	--ws-space-sm: 0.5rem;
+	--ws-space-md: 1rem;
+	--ws-space-lg: 1.5rem;
+	--ws-space-xl: 2rem;
+
+	/* Border Radius */
+	--ws-radius-sm: 0.25rem;
+	--ws-radius-md: 0.5rem;
+	--ws-radius-lg: 0.75rem;
+	--ws-radius-xl: 1rem;
+
+	/* Shadows */
+	--ws-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+	--ws-shadow-md: 0 4px 6px rgba(0, 0, 0, 0.3);
+	--ws-shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.3);
+
+	/* Typography */
+	--ws-font-mono: "JetBrains Mono", "Fira Code", "Consolas", monospace;
+	--ws-font-sans:
+		"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Workstation Layout
+   ───────────────────────────────────────────────────────────────────────────── */
+
+.workstation {
+	display: grid;
+	grid-template-columns: 320px 1fr 380px;
+	grid-template-rows: 56px minmax(0, 1fr);
+	height: 100vh;
+	background: var(--ws-bg-primary);
+	color: var(--ws-text-primary);
+	font-family: var(--ws-font-sans);
+	overflow: hidden;
+}
+
+.workstation-header {
+	grid-column: 1 / -1;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: var(--ws-space-sm) var(--ws-space-md);
+	background: var(--ws-bg-secondary);
+	border-bottom: 1px solid var(--ws-border);
+	height: 56px;
+}
+
+.workstation-logo {
+	display: flex;
+	align-items: center;
+	gap: var(--ws-space-sm);
+	font-weight: 700;
+	font-size: 1.125rem;
+	color: var(--ws-text-accent);
+}
+
+.workstation-logo svg {
+	width: 28px;
+	height: 28px;
+}
+
+.workstation-title {
+	font-size: 0.875rem;
+	color: var(--ws-text-secondary);
+	font-weight: 400;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Panel Clínico (Left Column)
+   ───────────────────────────────────────────────────────────────────────────── */
+
+.clinical-panel {
+	display: flex;
+	flex-direction: column;
+	gap: var(--ws-space-md);
+	padding: var(--ws-space-md);
+	background: var(--ws-bg-secondary);
+	border-right: 1px solid var(--ws-border);
+	overflow-y: auto;
+	overflow-x: hidden;
+	max-height: calc(100vh - 56px);
+	min-height: 0;
+}
+
+.clinical-card {
+	background: var(--ws-bg-card);
+	border: 1px solid var(--ws-border);
+	border-radius: var(--ws-radius-lg);
+	overflow: visible;
+	flex-shrink: 0;
+}
+
+.clinical-card-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: var(--ws-space-sm) var(--ws-space-md);
+	background: var(--ws-bg-tertiary);
+	border-bottom: 1px solid var(--ws-border);
+	font-size: 0.75rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--ws-text-secondary);
+}
+
+.clinical-card-body {
+	padding: var(--ws-space-md);
+	overflow: visible;
+}
+
+/* Patient Info */
+.patient-info {
+	display: grid;
+	gap: var(--ws-space-sm);
+}
+
+.patient-field {
+	display: flex;
+	justify-content: space-between;
+	font-size: 0.875rem;
+}
+
+.patient-field-label {
+	color: var(--ws-text-muted);
+}
+
+.patient-field-value {
+	color: var(--ws-text-primary);
+	font-weight: 500;
+}
+
+.patient-id {
+	font-family: var(--ws-font-mono);
+	font-size: 1.25rem;
+	font-weight: 700;
+	color: var(--ws-text-accent);
+	margin-bottom: var(--ws-space-sm);
+}
+
+/* Modality Indicator */
+.modality-indicator {
+	display: flex;
+	align-items: center;
+	gap: var(--ws-space-md);
+	padding: var(--ws-space-md);
+}
+
+.modality-badge {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 64px;
+	height: 64px;
+	border-radius: var(--ws-radius-lg);
+	font-size: 1.5rem;
+	font-weight: 700;
+	color: white;
+}
+
+.modality-badge.mri {
+	background: linear-gradient(135deg, var(--ws-modality-mri), #6d28d9);
+}
+
+.modality-badge.ct {
+	background: linear-gradient(135deg, var(--ws-modality-ct), #0284c7);
+}
+
+.modality-badge.tep {
+	background: linear-gradient(135deg, var(--ws-modality-tep), #b91c1c);
+}
+
+.modality-info {
+	flex: 1;
+}
+
+.modality-type {
+	font-size: 1.125rem;
+	font-weight: 700;
+	color: var(--ws-text-primary);
+}
+
+.modality-description {
+	font-size: 0.75rem;
+	color: var(--ws-text-secondary);
+	margin-top: 2px;
+}
+
+.modality-confidence {
+	display: flex;
+	align-items: center;
+	gap: var(--ws-space-xs);
+	margin-top: var(--ws-space-xs);
+	font-size: 0.75rem;
+	color: var(--ws-text-muted);
+}
+
+.confidence-bar {
+	flex: 1;
+	height: 4px;
+	background: var(--ws-bg-tertiary);
+	border-radius: 2px;
+	overflow: hidden;
+}
+
+.confidence-fill {
+	height: 100%;
+	background: var(--ws-success);
+	transition: width 0.3s ease;
+}
+
+/* Pathology Context */
+.pathology-context {
+	padding: var(--ws-space-md);
+	background: rgba(239, 68, 68, 0.1);
+	border-left: 3px solid var(--ws-error);
+	border-radius: 0 var(--ws-radius-md) var(--ws-radius-md) 0;
+}
+
+.pathology-context.ischemia {
+	background: rgba(245, 158, 11, 0.1);
+	border-left-color: var(--ws-warning);
+}
+
+.pathology-context.diffusion {
+	background: rgba(139, 92, 246, 0.1);
+	border-left-color: var(--ws-modality-mri);
+}
+
+.pathology-title {
+	display: flex;
+	align-items: center;
+	gap: var(--ws-space-sm);
+	font-size: 0.875rem;
+	font-weight: 600;
+	color: var(--ws-text-primary);
+	margin-bottom: var(--ws-space-sm);
+}
+
+.pathology-fields {
+	display: grid;
+	gap: var(--ws-space-sm);
+}
+
+.pathology-field {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.pathology-field label {
+	font-size: 0.7rem;
+	color: var(--ws-text-muted);
+	text-transform: uppercase;
+}
+
+.pathology-field input,
+.pathology-field select {
+	padding: var(--ws-space-xs) var(--ws-space-sm);
+	background: var(--ws-bg-primary);
+	border: 1px solid var(--ws-border);
+	border-radius: var(--ws-radius-sm);
+	color: var(--ws-text-primary);
+	font-size: 0.875rem;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Área de Diagnóstico Visual (Center Column)
+   ───────────────────────────────────────────────────────────────────────────── */
+
+.diagnostic-area {
+	display: flex;
+	flex-direction: column;
+	background: var(--ws-bg-primary);
+	overflow: hidden;
+	min-height: 0; /* Important for flex child to shrink */
+	height: 100%; /* Fill available height */
+}
+
+/* Viewer Tabs */
+.viewer-tabs {
+	display: flex;
+	gap: 2px;
+	padding: var(--ws-space-sm);
+	background: var(--ws-bg-secondary);
+	border-bottom: 1px solid var(--ws-border);
+}
+
+.viewer-tab {
+	display: flex;
+	align-items: center;
+	gap: var(--ws-space-xs);
+	padding: var(--ws-space-sm) var(--ws-space-md);
+	background: var(--ws-bg-tertiary);
+	border: none;
+	border-radius: var(--ws-radius-md) var(--ws-radius-md) 0 0;
+	color: var(--ws-text-secondary);
+	font-size: 0.875rem;
+	font-weight: 500;
+	cursor: pointer;
+	transition: all 0.2s ease;
+}
+
+.viewer-tab:hover {
+	background: var(--ws-bg-hover);
+	color: var(--ws-text-primary);
+}
+
+.viewer-tab.active {
+	background: var(--ws-bg-primary);
+	color: var(--ws-text-accent);
+}
+
+.viewer-tab-indicator {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--ws-text-muted);
+}
+
+.viewer-tab.active .viewer-tab-indicator {
+	background: var(--ws-text-accent);
+}
+
+/* Viewer Container */
+.viewer-container {
+	flex: 1;
+	position: relative;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: #000;
+	overflow: hidden;
+	min-height: 0; /* Important for flex child to shrink */
+	height: 100%; /* Fill available space */
+}
+
+.viewer-canvas {
+	max-width: 100%;
+	max-height: 100%;
+	width: auto;
+	height: auto;
+	object-fit: contain;
+}
+
+/* Viewer Controls */
+.viewer-controls {
+	position: absolute;
+	bottom: var(--ws-space-md);
+	left: 50%;
+	transform: translateX(-50%);
+	display: flex;
+	align-items: center;
+	gap: var(--ws-space-md);
+	padding: var(--ws-space-sm) var(--ws-space-md);
+	background: rgba(30, 41, 59, 0.95);
+	border: 1px solid var(--ws-border);
+	border-radius: var(--ws-radius-lg);
+	backdrop-filter: blur(8px);
+}
+
+.viewer-control-group {
+	display: flex;
+	align-items: center;
+	gap: var(--ws-space-sm);
+}
+
+.viewer-control-label {
+	font-size: 0.75rem;
+	color: var(--ws-text-secondary);
+	white-space: nowrap;
+}
+
+.viewer-slider {
+	width: 120px;
+	height: 4px;
+	background: var(--ws-bg-tertiary);
+	border-radius: 2px;
+	-webkit-appearance: none;
+	appearance: none;
+}
+
+.viewer-slider::-webkit-slider-thumb {
+	-webkit-appearance: none;
+	width: 14px;
+	height: 14px;
+	background: var(--ws-text-accent);
+	border-radius: 50%;
+	cursor: pointer;
+}
+
+.viewer-control-value {
+	min-width: 40px;
+	text-align: center;
+	font-family: var(--ws-font-mono);
+	font-size: 0.75rem;
+	color: var(--ws-text-primary);
+}
+
+/* Slice Navigator */
+.slice-navigator {
+	position: absolute;
+	right: var(--ws-space-md);
+	top: 50%;
+	transform: translateY(-50%);
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: var(--ws-space-xs);
+	padding: var(--ws-space-sm);
+	background: rgba(30, 41, 59, 0.95);
+	border: 1px solid var(--ws-border);
+	border-radius: var(--ws-radius-md);
+	backdrop-filter: blur(8px);
+}
+
+.slice-navigator input[type="range"] {
+	writing-mode: vertical-lr;
+	direction: rtl;
+	height: 200px;
+	width: 20px;
+}
+
+.slice-info {
+	font-family: var(--ws-font-mono);
+	font-size: 0.75rem;
+	color: var(--ws-text-secondary);
+	text-align: center;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Panel de Control (Right Column)
+   ───────────────────────────────────────────────────────────────────────────── */
+
+.control-panel {
+	display: flex;
+	flex-direction: column;
+	gap: var(--ws-space-md);
+	padding: var(--ws-space-md);
+	background: var(--ws-bg-secondary);
+	border-left: 1px solid var(--ws-border);
+	overflow-y: auto;
+	overflow-x: hidden;
+	max-height: calc(100vh - 56px);
+	min-height: 0;
+}
+
+/* Ensure cards inside panels don't shrink or get cut */
+.clinical-panel > .clinical-card,
+.control-panel > .clinical-card {
+	flex-shrink: 0;
+}
+
+/* Cards with scrollable content need explicit height */
+.clinical-panel .clinical-card.scrollable,
+.control-panel .clinical-card.scrollable {
+	max-height: 300px;
+	overflow: hidden;
+}
+
+.clinical-panel .clinical-card.scrollable .clinical-card-body,
+.control-panel .clinical-card.scrollable .clinical-card-body {
+	overflow-y: auto;
+	max-height: calc(300px - 40px);
+}
+
+/* Stats Widget */
+.stats-widget {
+	display: grid;
+	grid-template-columns: repeat(2, 1fr);
+	gap: var(--ws-space-sm);
+}
+
+.stat-item {
+	padding: var(--ws-space-sm);
+	background: var(--ws-bg-tertiary);
+	border-radius: var(--ws-radius-md);
+	text-align: center;
+}
+
+.stat-value {
+	font-family: var(--ws-font-mono);
+	font-size: 1.25rem;
+	font-weight: 700;
+	color: var(--ws-text-primary);
+}
+
+.stat-label {
+	font-size: 0.7rem;
+	color: var(--ws-text-muted);
+	text-transform: uppercase;
+	margin-top: 2px;
+}
+
+.stat-unit {
+	font-size: 0.75rem;
+	color: var(--ws-text-secondary);
+	font-weight: 400;
+}
+
+/* Reference Comparator */
+.reference-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 0.75rem;
+}
+
+.reference-table th {
+	padding: var(--ws-space-sm);
+	text-align: left;
+	background: var(--ws-bg-tertiary);
+	color: var(--ws-text-secondary);
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+}
+
+.reference-table td {
+	padding: var(--ws-space-sm);
+	border-bottom: 1px solid var(--ws-border);
+	color: var(--ws-text-primary);
+}
+
+.reference-value {
+	display: flex;
+	align-items: center;
+	gap: var(--ws-space-xs);
+}
+
+.reference-indicator {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+}
+
+.reference-indicator.normal {
+	background: var(--ws-success);
+}
+
+.reference-indicator.pathological {
+	background: var(--ws-error);
+}
+
+.reference-indicator.warning {
+	background: var(--ws-warning);
+}
+
+.current-value {
+	font-family: var(--ws-font-mono);
+	font-weight: 600;
+}
+
+.current-value.in-range {
+	color: var(--ws-success);
+}
+
+.current-value.out-of-range {
+	color: var(--ws-error);
+}
+
+/* Auto Conclusion */
+.auto-conclusion {
+	padding: var(--ws-space-md);
+	background: var(--ws-bg-tertiary);
+	border-radius: var(--ws-radius-md);
+	border-left: 3px solid var(--ws-info);
+}
+
+.auto-conclusion.severe {
+	border-left-color: var(--ws-error);
+	background: rgba(239, 68, 68, 0.1);
+}
+
+.auto-conclusion.moderate {
+	border-left-color: var(--ws-warning);
+	background: rgba(245, 158, 11, 0.1);
+}
+
+.auto-conclusion.normal {
+	border-left-color: var(--ws-success);
+	background: rgba(34, 197, 94, 0.1);
+}
+
+.conclusion-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-bottom: var(--ws-space-sm);
+}
+
+.conclusion-severity {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--ws-space-xs);
+	padding: 2px var(--ws-space-sm);
+	border-radius: var(--ws-radius-sm);
+	font-size: 0.7rem;
+	font-weight: 600;
+	text-transform: uppercase;
+}
+
+.conclusion-severity.critical {
+	background: var(--ws-severity-critical);
+	color: white;
+}
+
+.conclusion-severity.severe {
+	background: var(--ws-severity-severe);
+	color: white;
+}
+
+.conclusion-severity.moderate {
+	background: var(--ws-severity-moderate);
+	color: black;
+}
+
+.conclusion-severity.mild {
+	background: var(--ws-severity-mild);
+	color: black;
+}
+
+.conclusion-severity.normal {
+	background: var(--ws-severity-normal);
+	color: white;
+}
+
+.conclusion-summary {
+	font-size: 0.875rem;
+	color: var(--ws-text-primary);
+	line-height: 1.5;
+	margin-bottom: var(--ws-space-sm);
+}
+
+.conclusion-findings {
+	list-style: none;
+	padding: 0;
+	margin: 0;
+}
+
+.conclusion-findings li {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--ws-space-xs);
+	font-size: 0.8rem;
+	color: var(--ws-text-secondary);
+	padding: var(--ws-space-xs) 0;
+}
+
+.conclusion-findings li::before {
+	content: "•";
+	color: var(--ws-text-accent);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Pipeline Inspector
+   ───────────────────────────────────────────────────────────────────────────── */
+
+.pipeline-inspector {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.pipeline-stage {
+	background: var(--ws-bg-tertiary);
+	border-radius: var(--ws-radius-sm);
+	overflow: hidden;
+}
+
+.pipeline-stage-header {
+	display: flex;
+	align-items: center;
+	gap: var(--ws-space-sm);
+	padding: var(--ws-space-sm) var(--ws-space-md);
+	cursor: pointer;
+	transition: background 0.2s ease;
+}
+
+.pipeline-stage-header:hover {
+	background: var(--ws-bg-hover);
+}
+
+.pipeline-stage-icon {
+	width: 24px;
+	height: 24px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: var(--ws-radius-sm);
+	font-size: 0.875rem;
+}
+
+.pipeline-stage-icon.pending {
+	background: var(--ws-bg-primary);
+	color: var(--ws-text-muted);
+}
+
+.pipeline-stage-icon.processing {
+	background: var(--ws-processing);
+	color: white;
+	animation: pulse 1.5s infinite;
+}
+
+.pipeline-stage-icon.completed {
+	background: var(--ws-success);
+	color: white;
+}
+
+.pipeline-stage-icon.failed {
+	background: var(--ws-error);
+	color: white;
+}
+
+@keyframes pulse {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.6;
+	}
+}
+
+.pipeline-stage-info {
+	flex: 1;
+}
+
+.pipeline-stage-name {
+	font-size: 0.875rem;
+	font-weight: 500;
+	color: var(--ws-text-primary);
+}
+
+.pipeline-stage-status {
+	font-size: 0.7rem;
+	color: var(--ws-text-muted);
+}
+
+.pipeline-stage-chevron {
+	width: 16px;
+	height: 16px;
+	color: var(--ws-text-muted);
+	transition: transform 0.2s ease;
+}
+
+.pipeline-stage.expanded .pipeline-stage-chevron {
+	transform: rotate(90deg);
+}
+
+.pipeline-stage-content {
+	display: none;
+	padding: var(--ws-space-sm) var(--ws-space-md);
+	padding-left: calc(var(--ws-space-md) + 32px);
+	background: var(--ws-bg-primary);
+	border-top: 1px solid var(--ws-border);
+}
+
+.pipeline-stage.expanded .pipeline-stage-content {
+	display: block;
+}
+
+.pipeline-log {
+	display: flex;
+	gap: var(--ws-space-sm);
+	padding: var(--ws-space-xs) 0;
+	font-size: 0.75rem;
+}
+
+.pipeline-log-time {
+	font-family: var(--ws-font-mono);
+	color: var(--ws-text-muted);
+	flex-shrink: 0;
+}
+
+.pipeline-log-level {
+	font-family: var(--ws-font-mono);
+	font-size: 0.65rem;
+	padding: 1px 4px;
+	border-radius: 2px;
+	flex-shrink: 0;
+}
+
+.pipeline-log-level.level-info {
+	background: var(--ws-info);
+	color: white;
+}
+
+.pipeline-log-level.level-warning {
+	background: var(--ws-warning);
+	color: black;
+}
+
+.pipeline-log-level.level-error {
+	background: var(--ws-error);
+	color: white;
+}
+
+.pipeline-log-message {
+	color: var(--ws-text-secondary);
+	word-break: break-word;
+}
+
+.pipeline-log.error .pipeline-log-message {
+	color: var(--ws-error);
+}
+
+.pipeline-log.warning .pipeline-log-message {
+	color: var(--ws-warning);
+}
+
+/* Pipeline Buttons */
+.pipeline-btn {
+	padding: 4px 8px;
+	background: var(--ws-bg-tertiary);
+	border: 1px solid var(--ws-border);
+	border-radius: 4px;
+	color: var(--ws-text-secondary);
+	cursor: pointer;
+	font-size: 0.7rem;
+	transition:
+		background 0.2s,
+		border-color 0.2s;
+}
+
+.pipeline-btn:hover {
+	background: var(--ws-bg-hover);
+	border-color: var(--ws-border-light);
+}
+
+/* Pipeline Card - ensure it shows properly */
+.pipeline-card {
+	flex-shrink: 0;
+	min-height: 150px;
+	max-height: 280px;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden; /* Pipeline needs hidden for internal scroll */
+}
+
+.pipeline-card .clinical-card-body {
+	flex: 1;
+	overflow-y: auto;
+	min-height: 0;
+	padding: var(--ws-space-sm);
+}
+
+/* Progress Bar */
+.pipeline-progress {
+	height: 3px;
+	background: var(--ws-bg-primary);
+	overflow: hidden;
+}
+
+.pipeline-progress-fill {
+	height: 100%;
+	background: var(--ws-processing);
+	transition: width 0.3s ease;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Utility Classes
+   ───────────────────────────────────────────────────────────────────────────── */
+
+.hidden {
+	display: none !important;
+}
+
+.text-center {
+	text-align: center;
+}
+
+.text-right {
+	text-align: right;
+}
+
+.font-mono {
+	font-family: var(--ws-font-mono);
+}
+
+.truncate {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Scrollbar Styling */
+.clinical-panel::-webkit-scrollbar,
+.control-panel::-webkit-scrollbar {
+	width: 6px;
+}
+
+.clinical-panel::-webkit-scrollbar-track,
+.control-panel::-webkit-scrollbar-track {
+	background: var(--ws-bg-primary);
+}
+
+.clinical-panel::-webkit-scrollbar-thumb,
+.control-panel::-webkit-scrollbar-thumb {
+	background: var(--ws-border);
+	border-radius: 3px;
+}
+
+.clinical-panel::-webkit-scrollbar-thumb:hover,
+.control-panel::-webkit-scrollbar-thumb:hover {
+	background: var(--ws-border-light);
+}
