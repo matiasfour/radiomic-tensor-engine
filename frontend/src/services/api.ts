@@ -3,7 +3,7 @@ import type { Study, ROIStats, RoiData } from "../types";
 
 export const api = createApi({
 	reducerPath: "api",
-	baseQuery: fetchBaseQuery({ baseUrl: "http://localhost:8000/api/" }),
+	baseQuery: fetchBaseQuery({ baseUrl: "/api/" }),
 	tagTypes: ["Study"],
 	endpoints: builder => ({
 		getStudies: builder.query<Study[], void>({
