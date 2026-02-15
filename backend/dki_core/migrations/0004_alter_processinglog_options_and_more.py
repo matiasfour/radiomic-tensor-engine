@@ -32,42 +32,42 @@ class Migration(migrations.Migration):
             name='quality_report_pdf',
         ),
 
-        migrations.AddField(
+        migrations.AlterField(
             model_name='processingresult',
             name='brain_mask',
             field=models.FileField(blank=True, null=True, upload_to='results/ct_masks/'),
         ),
-        migrations.AddField(
+        migrations.AlterField(
             model_name='processingresult',
             name='mean_thrombus_kurtosis',
             field=models.FloatField(blank=True, null=True),
         ),
-        migrations.AddField(
+        migrations.AlterField(
             model_name='processingresult',
             name='tep_kurtosis_map',
             field=models.FileField(blank=True, null=True, upload_to='results/tep_kurtosis/'),
         ),
-        migrations.AddField(
+        migrations.AlterField(
             model_name='study',
             name='classification_confidence',
             field=models.FloatField(blank=True, null=True),
         ),
-        migrations.AddField(
+        migrations.AlterField(
             model_name='study',
             name='classification_details',
             field=models.JSONField(blank=True, null=True),
         ),
-        migrations.AddField(
+        migrations.AlterField(
             model_name='study',
             name='detected_modality',
             field=models.CharField(blank=True, max_length=20, null=True),
         ),
-        migrations.AddField(
+        migrations.AlterField(
             model_name='study',
             name='pipeline_progress',
             field=models.IntegerField(default=0, help_text='Progreso dentro de la etapa actual (0-100)'),
         ),
-        migrations.AddField(
+        migrations.AlterField(
             model_name='study',
             name='pipeline_stage',
             field=models.CharField(choices=[('INGESTION', 'Ingestion'), ('CLASSIFICATION', 'Classification'), ('VALIDATION', 'Validation'), ('PREPROCESSING', 'Preprocessing'), ('CROPPING', 'ROI Cropping'), ('FILTERING', 'Filtering'), ('TENSORIAL_CALCULATION', 'Tensorial Calculation'), ('SEGMENTATION', 'Segmentation'), ('QUANTIFICATION', 'Quantification'), ('OUTPUT', 'Output Generation'), ('COMPLETED', 'Completed'), ('FAILED', 'Failed')], default='INGESTION', help_text='Etapa actual del pipeline de procesamiento', max_length=30),
