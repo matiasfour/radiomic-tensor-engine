@@ -503,17 +503,28 @@ class TEPProcessingService:
         # UX METADATA GENERATION (Smart Scrollbar & Diagnostic Pins)
         # ════════════════════════════════════════════════════════════════════════
         
-        # 1. Smart Navigator Data (Active Slices)
-        # Find Z-indices for Heatmap Alerts (Red) — slices with thrombus
-        z_heatmap = [int(x) for x in np.unique(np.where(thrombus_mask)[0])]
+        total_slices = int(data.shape[0])  # Original volume Z count
         
-        # Find Z-indices for Flow Alerts (Purple)
-        # Only count inside lung/PA, excluding background
-        flow_alert_mask = (coherence_map < 0.4) & (lung_mask | pa_mask) & ~working_exclusion
-        z_flow = [int(x) for x in np.unique(np.where(flow_alert_mask)[0])]
+        # 1. Smart Navigator Data (Active Slices)
+        # Use the EXPANDED (full-size) masks so indices match total_slices
+        z_heatmap = sorted(set(
+            max(0, min(int(x), total_slices - 1))
+            for x in np.unique(np.where(thrombus_mask_full)[0])
+        ))
+        
+        # Flow alerts — use expanded masks too
+        flow_alert_mask = (
+            (self._expand_to_original(coherence_map, data.shape, crop_info) < 0.4)
+            & (lung_mask_full | pa_mask_full)
+            & ~self._expand_to_original(working_exclusion, data.shape, crop_info)
+        )
+        z_flow = sorted(set(
+            max(0, min(int(x), total_slices - 1))
+            for x in np.unique(np.where(flow_alert_mask)[0])
+        ))
         
         slices_meta = {
-            'total_slices': int(data.shape[0]),
+            'total_slices': total_slices,
             'alerts_heatmap': z_heatmap,   # Red lines on scrollbar
             'alerts_flow': z_flow          # Purple lines on scrollbar
         }
@@ -523,15 +534,18 @@ class TEPProcessingService:
         raw_findings = thrombus_info.get('voi_findings', []) or []
         
         for f in raw_findings:
-            # Centroid is (z, y, x) in numpy convention
+            # Centroid is (z, y, x) in numpy convention — from the CROPPED volume
             centroid = f.get('centroid', (0, 0, 0))
             cz, cy, cx = float(centroid[0]), float(centroid[1]), float(centroid[2])
+            
+            # Clamp Z to valid range (0 .. total_slices-1)
+            clamped_z = max(0, min(int(cz), total_slices - 1))
             
             pin = {
                 'id': int(f['id']),
                 'type': 'TEP_DEFINITE' if f.get('confidence') == 'DEFINITE' else 'TEP_SUSPICIOUS',
                 'location': {
-                    'slice_z': int(cz),
+                    'slice_z': clamped_z,
                     'coord_x': int(cx + crop_info['crop_bounds']['x_start']),
                     'coord_y': int(cy + crop_info['crop_bounds']['y_start'])
                 },
