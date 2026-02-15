@@ -584,7 +584,8 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 			!overlayCanvas ||
 			!mainCanvas ||
 			viewerState.activeMap !== "coherence" ||
-			!coherenceBundle.loaded
+			!coherenceBundle.loaded ||
+			!viewerState.showOverlay
 		)
 			return;
 
@@ -684,6 +685,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 		viewerState.currentSlice,
 		viewerState.activeMap,
 		viewerState.blendOpacity,
+		viewerState.showOverlay,
 		coherenceBundle.loaded,
 		coherenceBundle.slices,
 		coherenceBundle.total_slices,
@@ -697,7 +699,8 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 			!overlayCanvas ||
 			!mainCanvas ||
 			viewerState.activeMap !== "pseudocolor" ||
-			!pseudocolorBundle.loaded
+			!pseudocolorBundle.loaded ||
+			!viewerState.showOverlay
 		)
 			return;
 
@@ -765,6 +768,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 		viewerState.currentSlice,
 		viewerState.activeMap,
 		viewerState.blendOpacity,
+		viewerState.showOverlay,
 		pseudocolorBundle.loaded,
 		pseudocolorBundle.slices,
 		pseudocolorBundle.total_slices,
@@ -1505,7 +1509,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 					}}
 				>
 					{/* Layer Toggle common (Heatmap or Pseudocolor) */}
-					{(heatmapBundle.loaded || pseudocolorBundle.loaded) && (
+					{(heatmapBundle.loaded || pseudocolorBundle.loaded || coherenceBundle.loaded) && (
 						<div
 							style={{
 								display: "flex",
@@ -1909,7 +1913,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 									width: "100%",
 									height: "100%",
 									pointerEvents: "none",
-									opacity: viewerState.blendOpacity / 100,
+									opacity: 1.0, // Control opacity via canvas globalAlpha or pixel alpha to avoid double-scaling
 								}}
 							/>
 						)}
