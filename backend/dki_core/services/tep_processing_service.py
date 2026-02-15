@@ -2475,7 +2475,21 @@ class TEPProcessingService:
         # ═══════════════════════════════════════════════════════════════════════
         # Suppression: Clear excluded zones completely
         # ═══════════════════════════════════════════════════════════════════════
-        heatmap[exclusion_mask, :] = 0
+        # ═══════════════════════════════════════════════════════════════════════
+        # FIX: SUPPRESSION LOGIC (SMART MASKING)
+        # Prioridad: Hallazgo Confirmado > Máscara de Exclusión
+        # Esto evita que trombos murales o cercanos al hueso sean borrados visualmente.
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        # 1. Definir zonas protegidas (donde el algoritmo detectó patología)
+        findings_protection = definite_mask | suspicious_mask
+        
+        # 2. Calcular la exclusión segura:
+        # Solo enmascarar (pintar de negro) si es hueso/aire Y NO es un hallazgo.
+        safe_exclusion = exclusion_mask & ~findings_protection
+        
+        # 3. Aplicar supresión
+        heatmap[safe_exclusion, :] = 0
         
         return heatmap
     
