@@ -4,7 +4,7 @@
 
 import React, { useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { useGetStudyQuery } from "../services/api";
+import { useGetStudyQuery, API_BASE } from "../services/api";
 import {
 	PatientCard,
 	ModalityIndicator,
@@ -335,7 +335,7 @@ Generado automáticamente por Radiomic Tensorial Workstation
 							{(study.results?.audit_report ||
 								study.processing_result?.audit_report) && (
 								<a
-									href={`${import.meta.env.VITE_API_URL || "http://localhost:8000"}/api/studies/${study.id}/audit-report/`}
+									href={`${API_BASE}/api/studies/${study.id}/audit-report/`}
 									target="_blank"
 									rel="noopener noreferrer"
 									style={{

@@ -9,7 +9,8 @@ interface DiagnosticStationProps {
 	findingsPins?: FindingPin[];
 }
 
-const API_BASE = "http://localhost:8000/api";
+import { API_BASE } from "../services/api";
+const API_URL = API_BASE ? `${API_BASE}/api` : "/api";
 
 const DiagnosticStation: React.FC<DiagnosticStationProps> = ({
 	studyId,
@@ -62,7 +63,7 @@ const DiagnosticStation: React.FC<DiagnosticStationProps> = ({
 			try {
 				// Load raw CT slices
 				const ctImages = await loadBundle(
-					`${API_BASE}/studies/${studyId}/slices-bundle/?wc=40&ww=400&max_size=512`
+					`${API_URL}/studies/${studyId}/slices-bundle/?wc=40&ww=400&max_size=512`
 				);
 				setSliceImages(ctImages);
 				setTotalSlices(ctImages.length);
@@ -70,7 +71,7 @@ const DiagnosticStation: React.FC<DiagnosticStationProps> = ({
 				// Load heatmap overlay slices
 				try {
 					const hmImages = await loadBundle(
-						`${API_BASE}/studies/${studyId}/result-bundle/tep_heatmap/?max_size=512`
+						`${API_URL}/studies/${studyId}/result-bundle/tep_heatmap/?max_size=512`
 					);
 					setHeatmapImages(hmImages);
 				} catch {

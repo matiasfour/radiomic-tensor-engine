@@ -1,7 +1,7 @@
 import React from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Play, Activity, FileText, AlertCircle, Trash2, Download } from 'lucide-react';
-import { useGetStudyQuery, useProcessStudyMutation, useDeleteStudyMutation } from '../services/api';
+import { useGetStudyQuery, useProcessStudyMutation, useDeleteStudyMutation, API_BASE } from '../services/api';
 import styles from './StudyDetail.module.css';
 import CTViewer from '../components/CTViewer';
 
@@ -66,15 +66,15 @@ const CTStudyDetail: React.FC = () => {
   }
 
   const heatmapUrl = study.results?.heatmap 
-    ? (study.results.heatmap.startsWith('http') ? study.results.heatmap : `http://localhost:8000${study.results.heatmap}`)
+    ? (study.results.heatmap.startsWith('http') ? study.results.heatmap : `${API_BASE}${study.results.heatmap}`)
     : null;
 
   const entropyUrl = study.results?.entropy_map
-    ? (study.results.entropy_map.startsWith('http') ? study.results.entropy_map : `http://localhost:8000${study.results.entropy_map}`)
+    ? (study.results.entropy_map.startsWith('http') ? study.results.entropy_map : `${API_BASE}${study.results.entropy_map}`)
     : null;
 
   const glcmUrl = study.results?.glcm_map
-    ? (study.results.glcm_map.startsWith('http') ? study.results.glcm_map : `http://localhost:8000${study.results.glcm_map}`)
+    ? (study.results.glcm_map.startsWith('http') ? study.results.glcm_map : `${API_BASE}${study.results.glcm_map}`)
     : null;
 
   const statusClass = 
