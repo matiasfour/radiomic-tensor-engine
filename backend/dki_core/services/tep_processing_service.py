@@ -79,7 +79,7 @@ class TEPProcessingService:
     SCORE_MK_POINTS = 1                    # MK criterion contributes 1 point
     SCORE_FAC_POINTS = 1                   # FAC criterion contributes 1 point
     SCORE_THRESHOLD_SUSPICIOUS = 2         # Score >= 2 = suspicious (yellow/orange)
-    SCORE_THRESHOLD_DEFINITE = 3           # Score >= 3 = definite thrombus (red)
+    SCORE_THRESHOLD_DEFINITE = 2.5         # Score >= 2.5 = definite thrombus (Lowered for sensitivity)
     
     # ═══════════════════════════════════════════════════════════════════════════
     # CONTRAST INHIBITOR: Pixels with HU > this threshold get Score = 0
@@ -89,7 +89,7 @@ class TEPProcessingService:
     # ═══════════════════════════════════════════════════════════════════════════
     # BONE MASK DILATION: Iterations to "engulf" rib edges
     # ═══════════════════════════════════════════════════════════════════════════
-    BONE_DILATION_ITERATIONS = 8           # Dilate bone mask 8 pixels (~5mm) to eliminate rib noise (STRICT)
+    BONE_DILATION_ITERATIONS = 4           # Dilate bone mask 4 pixels (~2.5mm) - RELAXED from 8
     
     # ═══════════════════════════════════════════════════════════════════════════
     # ROI SAFETY EROSION: Anti-costal invasion buffer (DYNAMIC based on spacing)
@@ -580,9 +580,9 @@ class TEPProcessingService:
         raw_findings = thrombus_info.get('voi_findings', []) or []
         
         for f in raw_findings:
-            # ── MICRO-NOISE GATE: Skip anything < 15mm³ (Adjusted from 50) ──
+            # ── MICRO-NOISE GATE: Skip anything < 5mm³ (Adjusted from 15) ──
             vol_mm3 = float(f.get('volume_mm3', f.get('volume', 0) * 1000))
-            if vol_mm3 < 15.0:
+            if vol_mm3 < 5.0:
                 continue
             
             # Centroid is (z, y, x) in numpy convention — from the CROPPED volume
@@ -1538,12 +1538,12 @@ class TEPProcessingService:
         # ═══════════════════════════════════════════════════════════════════════════
         bone_mask = data_proc > 450
         
-        dilation_mm = 5.0
+        dilation_mm = 2.5  # Relaxed from 5.0mm to avoid eating peripheral vessels
         if spacing is not None:
             mean_spacing = np.mean(spacing[:2])  # XY spacing
             dilation_voxels = max(1, int(dilation_mm / mean_spacing))
         else:
-            dilation_voxels = 8
+            dilation_voxels = 4  # Relaxed from 8
         
         struct = generate_binary_structure(ndim, 1)
         bone_exclusion = binary_dilation(bone_mask, structure=struct, iterations=dilation_voxels)
@@ -1907,8 +1907,8 @@ class TEPProcessingService:
                 voxel_volume_mm3 = np.prod(spacing)
                 candidate_volume_mm3 = region.area * voxel_volume_mm3
 
-                # Filter out "Dust": Minimum 15mm3 (approx 2.5x2.5x2.5mm) to be clinical
-                if candidate_volume_mm3 < 15.0: 
+                # Filter out "Dust": Minimum 5mm3 (approx 1.7x1.7x1.7mm) to be clinical - RELAXED SENSITIVITY
+                if candidate_volume_mm3 < 5.0: 
                     continue
                 
                 # --- THE INFORMATION SANDWICH FIX ---
@@ -1993,6 +1993,13 @@ class TEPProcessingService:
                     except:
                         mean_score = 0.0
 
+                # ════════════════════════════════════════════════════════════════════
+                # SENSITIVITY BOOST: High-confidence Density
+                # ════════════════════════════════════════════════════════════════════
+                hu_mean = rugosity['mean_hu']
+                if 45 <= hu_mean <= 85:
+                    mean_score += 0.5
+                
                 voi_findings.append({
                     'id': idx + 1,
                     'volume': candidate_volume_mm3 / 1000.0,  # Convert mm³ → cm³
@@ -2000,7 +2007,7 @@ class TEPProcessingService:
                     'confidence': 'DEFINITE',
                     'predicted_recovery_fac': 0.5,
                     'fac_mean': rugosity['fac_mean'],
-                    'mean_hu': rugosity['mean_hu'],
+                    'mean_hu': hu_mean,
                     'score_mean': float(mean_score),
                     'centroid': region.centroid,
                     'slice_range': (z1, z2)
