@@ -450,6 +450,8 @@ class TEPProcessingService:
             if log_callback and original_count != len(clean_findings):
                 diff = original_count - len(clean_findings)
                 log_callback(f"   🧹 Sync Findings: Eliminados {diff} hallazgos fantasma (borrados por filtro óseo)")
+            elif log_callback:
+                log_callback(f"   ✨ Sync Findings: {len(clean_findings)} hallazgos validados post-filtro")
         # ════════════════════════════════════════════════════════════════════════
         
         # ═══════════════════════════════════════════════════════════════════════════
@@ -578,9 +580,9 @@ class TEPProcessingService:
         raw_findings = thrombus_info.get('voi_findings', []) or []
         
         for f in raw_findings:
-            # ── MICRO-NOISE GATE: Skip anything < 50mm³ ──
+            # ── MICRO-NOISE GATE: Skip anything < 15mm³ (Adjusted from 50) ──
             vol_mm3 = float(f.get('volume_mm3', f.get('volume', 0) * 1000))
-            if vol_mm3 < 50.0:
+            if vol_mm3 < 15.0:
                 continue
             
             # Centroid is (z, y, x) in numpy convention — from the CROPPED volume
@@ -1905,8 +1907,8 @@ class TEPProcessingService:
                 voxel_volume_mm3 = np.prod(spacing)
                 candidate_volume_mm3 = region.area * voxel_volume_mm3
 
-                # Filter out "Dust": Minimum 50mm3 (approx 3x3x3mm cube) to be clinical
-                if candidate_volume_mm3 < 50.0: 
+                # Filter out "Dust": Minimum 15mm3 (approx 2.5x2.5x2.5mm) to be clinical
+                if candidate_volume_mm3 < 15.0: 
                     continue
                 
                 # --- THE INFORMATION SANDWICH FIX ---
