@@ -1915,7 +1915,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 									width: "100%",
 									height: "100%",
 									pointerEvents: "none",
-									opacity: 1.0, // Control opacity via canvas globalAlpha or pixel alpha to avoid double-scaling
+									opacity: viewerState.blendOpacity / 100,
 								}}
 							/>
 						)}
