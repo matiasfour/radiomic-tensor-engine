@@ -1442,7 +1442,9 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 			? sourceBundles.total_slices
 			: viewerState.activeMap === "pseudocolor"
 				? pseudocolorBundle.total_slices
-				: heatmapBundle.total_slices;
+				: viewerState.activeMap === "coherence"
+					? coherenceBundle.total_slices
+					: heatmapBundle.total_slices;
 
 	// PDF URL for audit report
 	const pdfUrl = results?.audit_report

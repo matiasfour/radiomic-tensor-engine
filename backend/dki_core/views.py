@@ -536,6 +536,32 @@ class StudyViewSet(viewsets.ModelViewSet):
 
     def _run_tep_pipeline(self, study, log):
         """CT Pulmonary Embolism (TEP) detection pipeline."""
+        # ═══════════════════════════════════════════════════════════════════
+        # PURGE STALE RESULTS — prevents mixing heatmaps from different runs
+        # ═══════════════════════════════════════════════════════════════════
+        import glob
+        import shutil
+        results_base = os.path.join(settings.MEDIA_ROOT, 'results')
+        if os.path.exists(results_base):
+            pattern = os.path.join(results_base, 'tep_*', f'*_{study.id}.*')
+            stale_files = glob.glob(pattern)
+            for f in stale_files:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+            if stale_files:
+                log(f"Purged {len(stale_files)} stale result files for study {study.id}",
+                    stage='VALIDATION', metadata={'purged_files': [os.path.basename(f) for f in stale_files]})
+
+        # Also purge audit reports
+        audit_pattern = os.path.join(results_base, 'audit_reports', f'*_{study.id}.*')
+        for f in glob.glob(audit_pattern):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
         # Update stage to VALIDATION
         study.status = 'VALIDATING'
         study.pipeline_stage = 'VALIDATION'
