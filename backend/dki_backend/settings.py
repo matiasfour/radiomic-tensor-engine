@@ -84,18 +84,20 @@ WSGI_APPLICATION = 'dki_backend.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-if os.environ.get('DB_ENGINE') == 'postgresql':
+if os.environ.get('LIGHTNING_CLOUD') == 'true':
+    # Configuración para Lightning AI
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.postgresql',
-            'NAME': os.environ.get('DB_NAME', 'dki_db'),
-            'USER': os.environ.get('DB_USER', 'dki_user'),
-            'PASSWORD': os.environ.get('DB_PASSWORD', 'dki_password'),
-            'HOST': os.environ.get('DB_HOST', 'localhost'),
-            'PORT': os.environ.get('DB_PORT', '5432'),
+            'NAME': 'dki_db',
+            'USER': 'matias',               # Default user provided
+            'PASSWORD': 'crescendo2026',    # Default password provided
+            'HOST': 'localhost',
+            'PORT': '5432',
         }
     }
 else:
+    # Tu config vieja de SQLite (Local)
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
@@ -144,7 +146,7 @@ STATIC_URL = 'static/'
 # On Lightning AI, use persistent storage path
 LIGHTNING_MEDIA_PATH = Path('/teamspace/studios/this_studio/media')
 
-if LIGHTNING_MEDIA_PATH.exists():
+if os.environ.get('LIGHTNING_CLOUD') == 'true' and LIGHTNING_MEDIA_PATH.exists():
     MEDIA_ROOT = LIGHTNING_MEDIA_PATH
     print(f"⚡ Using Persistent Lightning Storage: {MEDIA_ROOT}")
 else:

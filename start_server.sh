@@ -5,20 +5,21 @@
 
 echo "⚡ Starting DKI Radiomic Workstation..."
 
-# 1. Install Dependencies
+# 1. Asegurar que Postgres esté corriendo
+sudo service postgresql start
+
+# 2. Instalar dependencias (por si acaso)
 echo "📦 Installing Python dependencies..."
 pip install -r backend/requirements.txt
 
-# 2. Database Migrations
-echo "🗄️ Applying database migrations..."
+# 3. Preparar Django
+export LIGHTNING_CLOUD=true
 cd backend
+python3 manage.py collectstatic --noinput
 python3 manage.py migrate
 
-# 3. Collect Static Files
-echo "🎨 Collecting static files..."
-python3 manage.py collectstatic --noinput
-
-# 4. Start Gunicorn
-echo "🚀 Launching Application on port 8000..."
-# 4 workers, binding to 0.0.0.0 to be accessible externally
-gunicorn dki_backend.wsgi:application --bind 0.0.0.0:8000 --workers 4
+# 4. Lanzar Servidor de Producción (Gunicorn)
+# Usamos Gunicorn porque es más robusto que runserver
+# Bind 0.0.0.0:8080 para que sea público
+echo "🚀 Servidor listo en puerto 8080"
+gunicorn dki_backend.wsgi:application --bind 0.0.0.0:8080 --workers 3 --timeout 120
