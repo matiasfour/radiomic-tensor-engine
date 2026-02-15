@@ -7,6 +7,7 @@ import { useNavigate } from "react-router-dom";
 import {
 	useCreateStudyMutation,
 	useProcessStudyMutation,
+	useListServerFoldersQuery,
 } from "../services/api";
 import type { Modality } from "../types";
 
@@ -18,10 +19,16 @@ interface UploadState {
 	error: string | null;
 }
 
+type Tab = "upload" | "server";
+
 const UnifiedUploadPage: React.FC = () => {
 	const navigate = useNavigate();
 	const [createStudy] = useCreateStudyMutation();
 	const [processStudy] = useProcessStudyMutation();
+	const { data: serverFoldersData, isLoading: isLoadingFolders } = useListServerFoldersQuery();
+
+	const [activeTab, setActiveTab] = useState<Tab>("upload");
+	const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
 
 	const [state, setState] = useState<UploadState>({
 		files: [],
@@ -104,10 +111,18 @@ const UnifiedUploadPage: React.FC = () => {
 
 	// Upload and process
 	const handleUpload = async () => {
-		if (state.files.length === 0) {
+		if (activeTab === "upload" && state.files.length === 0) {
 			setState(prev => ({
 				...prev,
 				error: "Seleccione archivos DICOM para subir",
+			}));
+			return;
+		}
+		
+		if (activeTab === "server" && !selectedFolder) {
+			setState(prev => ({
+				...prev,
+				error: "Seleccione una carpeta del servidor",
 			}));
 			return;
 		}
@@ -122,9 +137,15 @@ const UnifiedUploadPage: React.FC = () => {
 		try {
 			// Create FormData
 			const formData = new FormData();
-			state.files.forEach(file => {
-				formData.append("dicom_files", file);
-			});
+			
+			if (activeTab === "upload") {
+				state.files.forEach(file => {
+					formData.append("dicom_files", file);
+				});
+			} else {
+				formData.append("server_folder", selectedFolder!);
+			}
+			
 			formData.append("modality", selectedModality);
 			formData.append("patient_id", patientId || "ANON");
 			formData.append("study_date", studyDate);
@@ -181,6 +202,21 @@ const UnifiedUploadPage: React.FC = () => {
           --ws-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
           --ws-font-mono: 'JetBrains Mono', monospace;
         }
+		/* Custom Scrollbar */
+		::-webkit-scrollbar {
+			width: 8px;
+			height: 8px;
+		}
+		::-webkit-scrollbar-track {
+			background: var(--ws-bg-primary); 
+		}
+		::-webkit-scrollbar-thumb {
+			background: var(--ws-border); 
+			border-radius: 4px;
+		}
+		::-webkit-scrollbar-thumb:hover {
+			background: var(--ws-text-muted); 
+		}
       `}</style>
 
 			<div style={{ maxWidth: "800px", margin: "0 auto" }}>
@@ -200,142 +236,241 @@ const UnifiedUploadPage: React.FC = () => {
 						El sistema detectará automáticamente la modalidad y región anatómica
 					</p>
 				</div>
-
-				{/* Upload Zone */}
-				<div
-					onDragOver={handleDragOver}
-					onDragLeave={handleDragLeave}
-					onDrop={handleDrop}
-					style={{
-						border: `2px dashed ${state.isDragging ? "var(--ws-text-accent)" : "var(--ws-border)"}`,
-						borderRadius: "12px",
-						padding: "48px",
-						textAlign: "center",
-						background: state.isDragging
-							? "rgba(56, 189, 248, 0.1)"
-							: "var(--ws-bg-secondary)",
-						transition: "all 0.2s ease",
-						marginBottom: "24px",
-					}}
-				>
-					<div style={{ fontSize: "4rem", marginBottom: "16px" }}>
-						{state.isDragging ? "📂" : "🗂️"}
-					</div>
-					<p
+				
+				{/* Tabs */}
+				<div style={{ display: "flex", gap: "16px", marginBottom: "24px", justifyContent: "center" }}>
+					<button
+						onClick={() => setActiveTab("upload")}
 						style={{
-							fontSize: "1.125rem",
-							color: "var(--ws-text-primary)",
-							marginBottom: "8px",
+							padding: "12px 24px",
+							background: activeTab === "upload" ? "var(--ws-bg-tertiary)" : "transparent",
+							border: `1px solid ${activeTab === "upload" ? "var(--ws-text-accent)" : "var(--ws-border)"}`,
+							borderRadius: "8px",
+							color: activeTab === "upload" ? "var(--ws-text-accent)" : "var(--ws-text-secondary)",
+							cursor: "pointer",
+							fontWeight: 600,
+							transition: "all 0.2s ease"
 						}}
 					>
-						Arrastre archivos DICOM aquí
-					</p>
-					<p style={{ color: "var(--ws-text-muted)", marginBottom: "16px" }}>
-						o
-					</p>
-					<div style={{ display: "flex", gap: "12px", justifyContent: "center" }}>
-						<label
-							style={{
-								display: "inline-block",
-								padding: "12px 24px",
-								background: "var(--ws-text-accent)",
-								color: "var(--ws-bg-primary)",
-								borderRadius: "8px",
-								cursor: "pointer",
-								fontWeight: 600,
-							}}
-						>
-							📄 Archivos
-							<input
-								type="file"
-								multiple
-								// Remove restrictive accept to allow DICOMs without extension (e.g. I00003)
-								style={{ display: "none" }}
-								onChange={e => e.target.files && handleFiles(e.target.files)}
-							/>
-						</label>
-
-						<label
-							style={{
-								display: "inline-block",
-								padding: "12px 24px",
-								background: "var(--ws-bg-tertiary)",
-								border: "1px solid var(--ws-text-accent)",
-								color: "var(--ws-text-accent)",
-								borderRadius: "8px",
-								cursor: "pointer",
-								fontWeight: 600,
-							}}
-						>
-							📂 Carpeta
-							<input
-								type="file"
-								// @ts-expect-error - webkitdirectory is not standard but supported by browsers
-								webkitdirectory=""
-								directory=""
-								multiple
-								style={{ display: "none" }}
-								onChange={e => e.target.files && handleFiles(e.target.files)}
-							/>
-						</label>
-					</div>
+						💻 Subir Archivos Localmente
+					</button>
+					<button
+						onClick={() => setActiveTab("server")}
+						style={{
+							padding: "12px 24px",
+							background: activeTab === "server" ? "var(--ws-bg-tertiary)" : "transparent",
+							border: `1px solid ${activeTab === "server" ? "var(--ws-text-accent)" : "var(--ws-border)"}`,
+							borderRadius: "8px",
+							color: activeTab === "server" ? "var(--ws-text-accent)" : "var(--ws-text-secondary)",
+							cursor: "pointer",
+							fontWeight: 600,
+							transition: "all 0.2s ease"
+						}}
+					>
+						☁️ Importar desde Servidor
+					</button>
 				</div>
 
-				{/* Selected Files */}
-				{state.files.length > 0 && (
+				{/* Upload Zone (Tab: Upload) */}
+				{activeTab === "upload" && (
+					<>
+						<div
+							onDragOver={handleDragOver}
+							onDragLeave={handleDragLeave}
+							onDrop={handleDrop}
+							style={{
+								border: `2px dashed ${state.isDragging ? "var(--ws-text-accent)" : "var(--ws-border)"}`,
+								borderRadius: "12px",
+								padding: "48px",
+								textAlign: "center",
+								background: state.isDragging
+									? "rgba(56, 189, 248, 0.1)"
+									: "var(--ws-bg-secondary)",
+								transition: "all 0.2s ease",
+								marginBottom: "24px",
+							}}
+						>
+							<div style={{ fontSize: "4rem", marginBottom: "16px" }}>
+								{state.isDragging ? "📂" : "🗂️"}
+							</div>
+							<p
+								style={{
+									fontSize: "1.125rem",
+									color: "var(--ws-text-primary)",
+									marginBottom: "8px",
+								}}
+							>
+								Arrastre archivos DICOM aquí
+							</p>
+							<p style={{ color: "var(--ws-text-muted)", marginBottom: "16px" }}>
+								o
+							</p>
+							<div style={{ display: "flex", gap: "12px", justifyContent: "center" }}>
+								<label
+									style={{
+										display: "inline-block",
+										padding: "12px 24px",
+										background: "var(--ws-text-accent)",
+										color: "var(--ws-bg-primary)",
+										borderRadius: "8px",
+										cursor: "pointer",
+										fontWeight: 600,
+									}}
+								>
+									📄 Archivos
+									<input
+										type="file"
+										multiple
+										// Remove restrictive accept to allow DICOMs without extension (e.g. I00003)
+										style={{ display: "none" }}
+										onChange={e => e.target.files && handleFiles(e.target.files)}
+									/>
+								</label>
+
+								<label
+									style={{
+										display: "inline-block",
+										padding: "12px 24px",
+										background: "var(--ws-bg-tertiary)",
+										border: "1px solid var(--ws-text-accent)",
+										color: "var(--ws-text-accent)",
+										borderRadius: "8px",
+										cursor: "pointer",
+										fontWeight: 600,
+									}}
+								>
+									📂 Carpeta
+									<input
+										type="file"
+										// @ts-expect-error - webkitdirectory is not standard but supported by browsers
+										webkitdirectory=""
+										directory=""
+										multiple
+										style={{ display: "none" }}
+										onChange={e => e.target.files && handleFiles(e.target.files)}
+									/>
+								</label>
+							</div>
+						</div>
+
+						{/* Selected Files */}
+						{state.files.length > 0 && (
+							<div
+								style={{
+									background: "var(--ws-bg-secondary)",
+									borderRadius: "12px",
+									padding: "16px",
+									marginBottom: "24px",
+								}}
+							>
+								<div
+									style={{
+										display: "flex",
+										justifyContent: "space-between",
+										alignItems: "center",
+										marginBottom: "12px",
+									}}
+								>
+									<span style={{ fontWeight: 600 }}>
+										📁 {state.files.length} archivo(s) seleccionado(s)
+									</span>
+									<button
+										onClick={clearFiles}
+										style={{
+											background: "transparent",
+											border: "none",
+											color: "var(--ws-error)",
+											cursor: "pointer",
+											fontSize: "0.875rem",
+										}}
+									>
+										Limpiar
+									</button>
+								</div>
+								<div
+									style={{
+										maxHeight: "150px",
+										overflowY: "auto",
+										fontSize: "0.875rem",
+										color: "var(--ws-text-secondary)",
+									}}
+								>
+									{state.files.slice(0, 10).map((file, idx) => (
+										<div key={idx} style={{ padding: "4px 0" }}>
+											{file.name}
+										</div>
+									))}
+									{state.files.length > 10 && (
+										<div
+											style={{ color: "var(--ws-text-muted)", padding: "4px 0" }}
+										>
+											... y {state.files.length - 10} archivo(s) más
+										</div>
+									)}
+								</div>
+							</div>
+						)}
+					</>
+				)}
+				
+				{/* Server Folder Zone (Tab: Server) */}
+				{activeTab === "server" && (
 					<div
 						style={{
 							background: "var(--ws-bg-secondary)",
 							borderRadius: "12px",
-							padding: "16px",
+							padding: "32px",
 							marginBottom: "24px",
 						}}
 					>
-						<div
-							style={{
-								display: "flex",
-								justifyContent: "space-between",
-								alignItems: "center",
-								marginBottom: "12px",
-							}}
-						>
-							<span style={{ fontWeight: 600 }}>
-								📁 {state.files.length} archivo(s) seleccionado(s)
-							</span>
-							<button
-								onClick={clearFiles}
-								style={{
-									background: "transparent",
-									border: "none",
-									color: "var(--ws-error)",
-									cursor: "pointer",
-									fontSize: "0.875rem",
-								}}
-							>
-								Limpiar
-							</button>
-						</div>
-						<div
-							style={{
-								maxHeight: "150px",
+						<h3 style={{ marginBottom: "16px", color: "var(--ws-text-primary)" }}>
+							Carpetas Disponibles en Servidor
+						</h3>
+						<p style={{ color: "var(--ws-text-muted)", marginBottom: "24px", fontSize: "0.9rem" }}>
+							Seleccione una carpeta pre-cargada en <code>backend/default</code> para procesar sin tiempos de carga.
+						</p>
+						
+						{isLoadingFolders ? (
+							<div style={{ padding: "24px", textAlign: "center", color: "var(--ws-text-muted)" }}>
+								Cargando carpetas...
+							</div>
+						) : !serverFoldersData?.folders?.length ? (
+							<div style={{ padding: "24px", textAlign: "center", color: "var(--ws-text-muted)", border: "1px dashed var(--ws-border)", borderRadius: "8px" }}>
+								No se encontraron carpetas en <code>backend/default</code>
+							</div>
+						) : (
+							<div style={{ 
+								display: "grid", 
+								gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", 
+								gap: "12px",
+								maxHeight: "300px",
 								overflowY: "auto",
-								fontSize: "0.875rem",
-								color: "var(--ws-text-secondary)",
-							}}
-						>
-							{state.files.slice(0, 10).map((file, idx) => (
-								<div key={idx} style={{ padding: "4px 0" }}>
-									{file.name}
-								</div>
-							))}
-							{state.files.length > 10 && (
-								<div
-									style={{ color: "var(--ws-text-muted)", padding: "4px 0" }}
-								>
-									... y {state.files.length - 10} archivo(s) más
-								</div>
-							)}
-						</div>
+								paddingRight: "8px"
+							}}>
+								{serverFoldersData.folders.map((folder) => (
+									<button
+										key={folder}
+										onClick={() => setSelectedFolder(folder)}
+										style={{
+											padding: "16px",
+											background: selectedFolder === folder ? "rgba(56, 189, 248, 0.2)" : "var(--ws-bg-tertiary)",
+											border: `1px solid ${selectedFolder === folder ? "var(--ws-text-accent)" : "transparent"}`,
+											borderRadius: "8px",
+											color: selectedFolder === folder ? "var(--ws-text-accent)" : "var(--ws-text-primary)",
+											cursor: "pointer",
+											textAlign: "left",
+											display: "flex",
+											alignItems: "center",
+											gap: "12px",
+											transition: "all 0.2s ease"
+										}}
+									>
+										<span style={{ fontSize: "1.5rem" }}>📁</span>
+										<span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{folder}</span>
+									</button>
+								))}
+							</div>
+						)}
 					</div>
 				)}
 
@@ -494,24 +629,34 @@ const UnifiedUploadPage: React.FC = () => {
 				{/* Upload Button */}
 				<button
 					onClick={handleUpload}
-					disabled={state.files.length === 0 || state.isUploading}
+					disabled={
+						(activeTab === "upload" && state.files.length === 0) ||
+						(activeTab === "server" && !selectedFolder) ||
+						state.isUploading
+					}
 					style={{
 						width: "100%",
 						padding: "16px",
 						background:
-							state.files.length === 0 || state.isUploading
+							(activeTab === "upload" && state.files.length === 0) ||
+							(activeTab === "server" && !selectedFolder) ||
+							state.isUploading
 								? "var(--ws-bg-tertiary)"
 								: "var(--ws-success)",
 						border: "none",
 						borderRadius: "8px",
 						color:
-							state.files.length === 0 || state.isUploading
+							(activeTab === "upload" && state.files.length === 0) ||
+							(activeTab === "server" && !selectedFolder) ||
+							state.isUploading
 								? "var(--ws-text-muted)"
 								: "white",
 						fontSize: "1rem",
 						fontWeight: 600,
 						cursor:
-							state.files.length === 0 || state.isUploading
+							(activeTab === "upload" && state.files.length === 0) ||
+							(activeTab === "server" && !selectedFolder) ||
+							state.isUploading
 								? "not-allowed"
 								: "pointer",
 						display: "flex",
@@ -520,7 +665,11 @@ const UnifiedUploadPage: React.FC = () => {
 						gap: "8px",
 					}}
 				>
-					{state.isUploading ? <>⏳ Procesando...</> : <>🚀 Iniciar Análisis</>}
+					{state.isUploading ? (
+						<>⏳ Procesando...</>
+					) : (
+						<>🚀 Iniciar Análisis {activeTab === "server" ? "(Desde Servidor)" : ""}</>
+					)}
 				</button>
 
 				{/* Auto-detect Info */}

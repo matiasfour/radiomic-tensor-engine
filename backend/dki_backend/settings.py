@@ -175,6 +175,9 @@ DATA_UPLOAD_MAX_NUMBER_FILES = 10000
 DATA_UPLOAD_MAX_MEMORY_SIZE = 524288000  # 500 MB
 FILE_UPLOAD_MAX_MEMORY_SIZE = 524288000  # 500 MB
 
+# Server-Side Import Configuration
+DEFAULT_IMPORT_DIR = BASE_DIR / 'default'
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # RADIOMIC ENGINE CONFIGURATION
 # Umbrales físicos configurables para diagnóstico médico
