@@ -63,6 +63,9 @@ class Study(models.Model):
     classification_confidence = models.FloatField(blank=True, null=True)
     classification_details = models.JSONField(blank=True, null=True)
 
+    class Meta:
+        db_table = 'dki_core_study'
+        
     def __str__(self):
         return f"Study {self.id} - {self.patient_id or 'Unknown'} ({self.modality})"
     
@@ -122,6 +125,9 @@ class ProcessingResult(models.Model):
     # Audit Report (PDF)
     audit_report = models.FileField(upload_to='results/audit_reports/', blank=True, null=True)
     
+    class Meta:
+        db_table = 'dki_core_processingresult'
+        
     created_at = models.DateTimeField(auto_now_add=True)
 
 
@@ -144,4 +150,5 @@ class ProcessingLog(models.Model):
     metadata = models.JSONField(blank=True, null=True)
 
     class Meta:
+        db_table = 'dki_core_processinglog'
         ordering = ['timestamp']
