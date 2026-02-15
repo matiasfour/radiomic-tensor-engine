@@ -1,34 +1,35 @@
 #!/bin/bash
 
-# Lightning AI Startup Script
-# Usage: ./start_server.sh
+echo "🚀 Iniciando DKI Radiomic Workstation..."
 
-echo "⚡ Starting DKI Radiomic Workstation..."
-
-# 1. Asegurar que Postgres esté corriendo
+# 1. Levantar la base de datos Postgres (por si el Studio se durmió)
 sudo service postgresql start
 
-# 2. Instalar dependencias (por si acaso)
-echo "📦 Installing Python dependencies..."
-pip install -r backend/requirements.txt
+# 2. Limpieza de Caché y Archivos Temporales
+echo "🧹 Limpiando estáticos y archivos temporales..."
+rm -rf backend/staticfiles/*
+# Descomenta la siguiente línea para borrar resultados de procesamiento previos:
+# rm -rf /teamspace/studios/this_studio/media/results/*
 
-# 3. Preparar Django
+# 3. Instalación de dependencias críticas
+echo "📦 Verificando dependencias..."
+pip install -r backend/requirements.txt --quiet
+
+# 4. Preparar Django
 export LIGHTNING_CLOUD=true
-export DB_ENGINE=postgresql
-
-# Persistent media storage (survives restarts)
-export MEDIA_ROOT="/teamspace/studios/this_studio/media"
-mkdir -p "$MEDIA_ROOT"
-echo "💾 MEDIA_ROOT → $MEDIA_ROOT"
-
 cd backend
 
-echo "🔄 Running migrations..."
-python3 manage.py collectstatic --noinput
-python3 manage.py migrate
+echo "📂 Recopilando estáticos (Frontend)..."
+python manage.py collectstatic --noinput --clear
 
-# 4. Lanzar Servidor de Producción (Gunicorn)
-# Usamos Gunicorn porque es más robusto que runserver
-# Bind 0.0.0.0:8080 para que sea público
-echo "🚀 Servidor listo en puerto 8080 con Postgres"
-gunicorn dki_backend.wsgi:application --bind 0.0.0.0:8080 --workers 3 --timeout 600
+echo "🔄 Aplicando migraciones de base de datos..."
+python manage.py migrate --noinput
+
+# 5. Arrancar Gunicorn (Producción)
+echo "✅ Servidor listo en puerto 8000"
+gunicorn dki_backend.wsgi:application \
+    --bind 0.0.0.0:8000 \
+    --workers 3 \
+    --timeout 600 \
+    --access-logfile - \
+    --error-logfile -

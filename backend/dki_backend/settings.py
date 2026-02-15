@@ -147,35 +147,12 @@ STATIC_URL = 'static/'
 # are stored under MEDIA_ROOT.  On Lightning AI this MUST point to persistent
 # storage so files survive restarts and are served via /media/ URLs.
 
-def _resolve_media_root():
-    """Pick the best MEDIA_ROOT: env-var → well-known Lightning paths → local."""
-    # 1. Explicit env override (set in start_server.sh)
-    env_path = os.environ.get('MEDIA_ROOT')
-    if env_path:
-        p = Path(env_path)
-        p.mkdir(parents=True, exist_ok=True)
-        return p
+if os.environ.get('LIGHTNING_CLOUD') == 'true':
+    MEDIA_ROOT = '/teamspace/studios/this_studio/media'
+else:
+    MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
-    # 2. Lightning AI – try well-known persistent paths
-    if os.environ.get('LIGHTNING_CLOUD') == 'true':
-        candidates = [
-            Path('/teamspace/studios/this_studio/media'),
-            Path('/teamspace/s3_connections/media'),
-            Path('/home/zeus/media'),
-        ]
-        for candidate in candidates:
-            try:
-                candidate.mkdir(parents=True, exist_ok=True)
-                return candidate
-            except OSError:
-                continue
-
-    # 3. Local fallback
-    local = BASE_DIR / 'media'
-    local.mkdir(parents=True, exist_ok=True)
-    return local
-
-MEDIA_ROOT = _resolve_media_root()
+os.makedirs(MEDIA_ROOT, exist_ok=True)
 print(f"{'⚡' if os.environ.get('LIGHTNING_CLOUD') == 'true' else '📂'} MEDIA_ROOT → {MEDIA_ROOT}")
 
 MEDIA_URL = '/media/'
@@ -188,7 +165,7 @@ STATICFILES_DIRS = [
 
 # Enable Whitenoise to serve the React app (index.html) as the root
 WHITENOISE_ROOT = os.path.join(BASE_DIR, '../frontend/dist')
-STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+STATICFILES_STORAGE = 'whitenoise.storage.StaticFilesStorage'
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
