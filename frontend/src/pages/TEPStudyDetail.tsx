@@ -12,6 +12,7 @@ import {
 	useGetStudyQuery,
 	useProcessStudyMutation,
 	useDeleteStudyMutation,
+	API_BASE,
 } from "../services/api";
 import styles from "./StudyDetail.module.css";
 import TEPViewer from "../components/TEPViewer";
@@ -86,31 +87,31 @@ const TEPStudyDetail: React.FC = () => {
 	const heatmapUrl = result?.tep_heatmap
 		? result.tep_heatmap.startsWith("http")
 			? result.tep_heatmap
-			: `http://localhost:8000${result.tep_heatmap}`
+			: `${API_BASE}${result.tep_heatmap}`
 		: null;
 
 	const thrombusUrl = result?.tep_thrombus_mask
 		? result.tep_thrombus_mask.startsWith("http")
 			? result.tep_thrombus_mask
-			: `http://localhost:8000${result.tep_thrombus_mask}`
+			: `${API_BASE}${result.tep_thrombus_mask}`
 		: null;
 
 	const paUrl = result?.tep_pa_mask
 		? result.tep_pa_mask.startsWith("http")
 			? result.tep_pa_mask
-			: `http://localhost:8000${result.tep_pa_mask}`
+			: `${API_BASE}${result.tep_pa_mask}`
 		: null;
 
 	const roiUrl = result?.tep_roi_heatmap
 		? result.tep_roi_heatmap.startsWith("http")
 			? result.tep_roi_heatmap
-			: `http://localhost:8000${result.tep_roi_heatmap}`
+			: `${API_BASE}${result.tep_roi_heatmap}`
 		: null;
 
 	const sourceUrl = result?.source_volume
 		? result.source_volume.startsWith("http")
 			? result.source_volume
-			: `http://localhost:8000${result.source_volume}`
+			: `${API_BASE}${result.source_volume}`
 		: null;
 
 	const statusClass =

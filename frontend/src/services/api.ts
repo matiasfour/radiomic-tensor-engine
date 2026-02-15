@@ -1,6 +1,8 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import type { Study, ROIStats, RoiData } from "../types";
 
+export const API_BASE = import.meta.env.VITE_API_URL || "";
+
 export const api = createApi({
 	reducerPath: "api",
 	baseQuery: fetchBaseQuery({ baseUrl: "/api/" }),

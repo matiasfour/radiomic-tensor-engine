@@ -6,6 +6,7 @@ import {
 	useProcessStudyMutation,
 	useGetROIStatsMutation,
 	useDeleteStudyMutation,
+	API_BASE,
 } from "../services/api";
 import Viewer from "../components/Viewer";
 import type { ROIStats } from "../types";
@@ -90,7 +91,7 @@ const StudyDetail: React.FC = () => {
 		study.processing_result?.mk_map || study.results?.mk_map
 			? (() => {
 					const url = study.processing_result?.mk_map || study.results?.mk_map;
-					return url?.startsWith("http") ? url : `http://localhost:8000${url}`;
+					return url?.startsWith("http") ? url : `${API_BASE}${url}`;
 				})()
 			: null;
 
