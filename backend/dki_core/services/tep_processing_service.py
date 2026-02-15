@@ -534,11 +534,16 @@ class TEPProcessingService:
         raw_findings = thrombus_info.get('voi_findings', []) or []
         
         for f in raw_findings:
+            # ── MICRO-NOISE GATE: Skip anything < 50mm³ ──
+            vol_mm3 = float(f.get('volume_mm3', f.get('volume', 0) * 1000))
+            if vol_mm3 < 50.0:
+                continue
+            
             # Centroid is (z, y, x) in numpy convention — from the CROPPED volume
             centroid = f.get('centroid', (0, 0, 0))
             cz, cy, cx = float(centroid[0]), float(centroid[1]), float(centroid[2])
             
-            # Clamp Z to valid range (0 .. total_slices-1)
+            # ── BOUNDARY GUARD: Clamp Z to valid range [0, total_slices-1] ──
             clamped_z = max(0, min(int(cz), total_slices - 1))
             
             pin = {
@@ -553,7 +558,7 @@ class TEPProcessingService:
                     'score_total': float(round(float(f.get('score_mean', 0)), 1)),
                     'density_hu': int(float(f.get('mean_hu', 0))),
                     'flow_coherence': float(round(1.0 - float(f.get('fac_mean', 0)), 2)),
-                    'volume_mm3': int(float(f.get('volume', 0)) * 1000)
+                    'volume_mm3': int(vol_mm3)
                 }
             }
             findings_pins.append(pin)
@@ -1944,7 +1949,8 @@ class TEPProcessingService:
 
                 voi_findings.append({
                     'id': idx + 1,
-                    'volume': region.area * (0.001), 
+                    'volume': candidate_volume_mm3 / 1000.0,  # Convert mm³ → cm³
+                    'volume_mm3': candidate_volume_mm3,
                     'confidence': 'DEFINITE',
                     'predicted_recovery_fac': 0.5,
                     'fac_mean': rugosity['fac_mean'],
