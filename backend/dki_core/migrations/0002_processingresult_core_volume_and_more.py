@@ -40,12 +40,8 @@ class Migration(migrations.Migration):
             name='quality_report_pdf',
             field=models.FileField(blank=True, null=True, upload_to='results/ct_reports/'),
         ),
-        migrations.AddField(
-            model_name='processingresult',
-            name='uncertainty_sigma',
-            field=models.FloatField(blank=True, null=True),
-        ),
-        migrations.AddField(
+
+        migrations.AlterField(
             model_name='study',
             name='modality',
             field=models.CharField(choices=[('MRI_DKI', 'MRI - Diffusion Kurtosis Imaging'), ('CT_SMART', 'CT - Bio-Tensor SMART')], default='MRI_DKI', max_length=20),
