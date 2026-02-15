@@ -10,12 +10,12 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AlterField(
+        migrations.AddField(
             model_name='processingresult',
             name='slices_meta',
             field=models.JSONField(blank=True, help_text='Smart Scrollbar: alert Z-indices for heatmap and flow', null=True),
         ),
-        migrations.AlterField(
+        migrations.AddField(
             model_name='processingresult',
             name='findings_pins',
             field=models.JSONField(blank=True, help_text='Diagnostic Pins: coordinate markers with score tooltips', null=True),
