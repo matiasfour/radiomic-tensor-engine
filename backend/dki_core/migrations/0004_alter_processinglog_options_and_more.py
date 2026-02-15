@@ -23,6 +23,7 @@ class Migration(migrations.Migration):
                 ('study', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='logs', to='dki_core.study')),
             ],
             options={
+                'db_table': 'dki_core_processinglog',
                 'ordering': ['timestamp'],
             },
         ),
