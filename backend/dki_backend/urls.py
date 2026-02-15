@@ -22,8 +22,10 @@ from django.conf.urls.static import static
 from django.views.static import serve as static_serve
 
 import os
+from pathlib import Path as _Path
 
-FRONTEND_DIST = os.path.join(settings.BASE_DIR, '..', 'frontend', 'dist')
+# Resolve the .. so Django static_serve can find the files
+FRONTEND_DIST = str((_Path(settings.BASE_DIR) / '..' / 'frontend' / 'dist').resolve())
 
 urlpatterns = [
     path('admin/', admin.site.urls),
