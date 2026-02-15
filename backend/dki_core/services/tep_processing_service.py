@@ -408,6 +408,50 @@ class TEPProcessingService:
         if log_callback:
             log_callback(f"   ✅ Post-Laplacian: {new_clot_count} lesions remain after bone-edge filtering")
         
+        # ════════════════════════════════════════════════════════════════════════
+        # FIX: SYNC FINDINGS WITH CLEANED MASK (ELIMINAR HALLAZGOS FANTASMA)
+        # Filtra la lista voi_findings para quitar los que fueron borrados por 
+        # el filtro de hueso, evitando pines en slices vacíos.
+        # ════════════════════════════════════════════════════════════════════════
+        if thrombus_info.get('voi_findings'):
+            original_count = len(thrombus_info['voi_findings'])
+            clean_findings = []
+            
+            for f in thrombus_info['voi_findings']:
+                # Verificar si el hallazgo todavía existe en la máscara limpia
+                cz, cy, cx = f['centroid']
+                z, y, x = int(cz), int(cy), int(cx)
+                
+                # Chequeo de límites (Boundary check)
+                if (0 <= z < thrombus_mask.shape[0] and 
+                    0 <= y < thrombus_mask.shape[1] and 
+                    0 <= x < thrombus_mask.shape[2]):
+                    
+                    # Verificamos si hay "algo" en la vecindad del centroide.
+                    # Usamos una ventana de 3x3x3 por si el centroide cae en un hueco
+                    # (ej. trombos con forma de 'C' o dona).
+                    z_min, z_max = max(0, z-1), min(z+2, thrombus_mask.shape[0])
+                    y_min, y_max = max(0, y-1), min(y+2, thrombus_mask.shape[1])
+                    x_min, x_max = max(0, x-1), min(x+2, thrombus_mask.shape[2])
+                    
+                    local_region = thrombus_mask[z_min:z_max, y_min:y_max, x_min:x_max]
+                    
+                    if np.any(local_region):
+                        clean_findings.append(f)
+            
+            # Actualizar la lista oficial y los contadores
+            thrombus_info['voi_findings'] = clean_findings
+            thrombus_info['clot_count'] = len(clean_findings)
+            
+            # Recalcular desglose de contadores (Definite vs Suspicious)
+            thrombus_info['clot_count_definite'] = sum(1 for f in clean_findings if f.get('score_mean', 0) >= self.SCORE_THRESHOLD_DEFINITE)
+            thrombus_info['clot_count_suspicious'] = len(clean_findings) - thrombus_info['clot_count_definite']
+            
+            if log_callback and original_count != len(clean_findings):
+                diff = original_count - len(clean_findings)
+                log_callback(f"   🧹 Sync Findings: Eliminados {diff} hallazgos fantasma (borrados por filtro óseo)")
+        # ════════════════════════════════════════════════════════════════════════
+        
         # ═══════════════════════════════════════════════════════════════════════════
         # STEP 8: Calculate obstruction metrics and Qanadli score
         # ═══════════════════════════════════════════════════════════════════════════
