@@ -58,12 +58,7 @@ class StudyViewSet(viewsets.ModelViewSet):
                 )
                 
                 # Create a mutable copy of the data
-                # request.data is immutable QueryDict, we can convert it to dict
-                # but we need to be careful with file uploads.
-                # Since we are constructing the data for the serializer manually:
-                
                 data = {}
-                # Copy other fields if any (e.g. patient_id if sent manually)
                 for key, value in request.data.items():
                     if key != 'dicom_files':
                         data[key] = value
@@ -81,17 +76,87 @@ class StudyViewSet(viewsets.ModelViewSet):
                 if os.path.exists(tmp_zip_path):
                     os.unlink(tmp_zip_path)
         
+        # Handle Server-Side Import
+        elif 'server_folder' in request.data:
+            folder_name = request.data.get('server_folder')
+            import_path = settings.DEFAULT_IMPORT_DIR / folder_name
+            
+            if not import_path.exists() or not import_path.is_dir():
+                 return Response({'error': f'Folder "{folder_name}" not found on server'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Create Study without dicom_archive initially
+            data = request.data.copy()
+            serializer = self.get_serializer(data=data)
+            serializer.is_valid(raise_exception=True)
+            study = serializer.save()
+            
+            # Generate dummy zip for consistency (optional but good for model integrity if field is required)
+            # For now, we'll skip zip creation and just copy files to extract path directly
+            # Note: Model definition says dicom_archive is required? It's a FileField.
+            # We might need to dummy it or make it blank=True. 
+            # Let's assume we can set just dicom_directory.
+            # Edit: Warning, dicom_archive is likely required in DB. 
+            # Strategy: Create a zip from the server folder to satisfy the model constraint.
+            
+            import shutil
+            tmp_zip_path = os.path.join(tempfile.gettempdir(), f"{study.id}_import.zip")
+            with zipfile.ZipFile(tmp_zip_path, 'w') as zf:
+                for root, dirs, files in os.walk(import_path):
+                    for file in files:
+                        if file.lower().endswith('.dcm') or '.' not in file:
+                             file_path = os.path.join(root, file)
+                             arcname = os.path.relpath(file_path, import_path)
+                             zf.write(file_path, arcname)
+            
+            with open(tmp_zip_path, 'rb') as f:
+                 study.dicom_archive.save(f"imported_{folder_name}.zip", f)
+            
+            os.unlink(tmp_zip_path)
+
+            # Now perform extraction (same as upload flow)
+            extract_path = os.path.join(settings.MEDIA_ROOT, 'extracted', str(study.id))
+            os.makedirs(extract_path, exist_ok=True)
+            
+            # Copy files directly (faster than extracting the zip we just made)
+            # or just use the zip extraction logic for consistency.
+            # Let's use the service
+            dicom_service = DicomService()
+            dicom_service.extract_zip(study.dicom_archive.path, extract_path)
+            
+            study.dicom_directory = extract_path
+            study.save()
+            
+            headers = self.get_success_headers(serializer.data)
+            return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
         return super().create(request, *args, **kwargs)
 
     def perform_create(self, serializer):
         study = serializer.save()
-        # Extract zip
-        dicom_service = DicomService()
-        extract_path = os.path.join(settings.MEDIA_ROOT, 'extracted', str(study.id))
-        os.makedirs(extract_path, exist_ok=True)
-        dicom_service.extract_zip(study.dicom_archive.path, extract_path)
-        study.dicom_directory = extract_path
-        study.save()
+        # Extract zip if it exists (standard upload flow)
+        if study.dicom_archive:
+            dicom_service = DicomService()
+            extract_path = os.path.join(settings.MEDIA_ROOT, 'extracted', str(study.id))
+            os.makedirs(extract_path, exist_ok=True)
+            dicom_service.extract_zip(study.dicom_archive.path, extract_path)
+            study.dicom_directory = extract_path
+            study.save()
+
+    @decorators.action(detail=False, methods=['get'])
+    def list_server_folders(self, request):
+        """Devuelve la lista de carpetas disponibles en backend/default"""
+        import_dir = settings.DEFAULT_IMPORT_DIR
+        try:
+            if not import_dir.exists():
+                return Response({'folders': []})
+                
+            folders = [
+                f.name for f in import_dir.iterdir() 
+                if f.is_dir() and not f.name.startswith('.')
+            ]
+            return Response({'folders': sorted(folders)})
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @decorators.action(detail=True, methods=['post'])
     def process(self, request, pk=None):

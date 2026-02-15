@@ -45,6 +45,9 @@ export const api = createApi({
 			}),
 			invalidatesTags: ["Study"],
 		}),
+		listServerFolders: builder.query<{ folders: string[] }, void>({
+			query: () => "studies/list_server_folders/",
+		}),
 	}),
 });
 
@@ -55,4 +58,5 @@ export const {
 	useProcessStudyMutation,
 	useGetROIStatsMutation,
 	useDeleteStudyMutation,
+	useListServerFoldersQuery,
 } = api;
