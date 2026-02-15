@@ -22,4 +22,4 @@ python3 manage.py migrate
 # Usamos Gunicorn porque es más robusto que runserver
 # Bind 0.0.0.0:8080 para que sea público
 echo "🚀 Servidor listo en puerto 8080"
-gunicorn dki_backend.wsgi:application --bind 0.0.0.0:8080 --workers 3 --timeout 120
+gunicorn dki_backend.wsgi:application --bind 0.0.0.0:8080 --workers 3 --timeout 600
