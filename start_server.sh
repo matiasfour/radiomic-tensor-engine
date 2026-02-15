@@ -15,6 +15,12 @@ pip install -r backend/requirements.txt
 # 3. Preparar Django
 export LIGHTNING_CLOUD=true
 export DB_ENGINE=postgresql
+
+# Persistent media storage (survives restarts)
+export MEDIA_ROOT="/teamspace/studios/this_studio/media"
+mkdir -p "$MEDIA_ROOT"
+echo "💾 MEDIA_ROOT → $MEDIA_ROOT"
+
 cd backend
 
 echo "🔄 Running migrations..."
