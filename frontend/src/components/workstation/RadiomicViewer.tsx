@@ -7,7 +7,8 @@ import React, { useState, useCallback, useEffect, useRef } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
-import type { ViewerState, Modality, ProcessingResult } from "../../types";
+import type { ViewerState, Modality, ProcessingResult, VoiFinding, SlicesMeta, FindingPin } from "../../types";
+
 
 // ... existing code ...
 
@@ -30,22 +31,11 @@ interface RadiomicViewerProps {
 	modality: Modality;
 	results?: ProcessingResult;
 	baseUrl?: string;
+	slicesMeta?: SlicesMeta;
+	findingsPins?: FindingPin[];
 }
 
-type MapType =
-	| "source"
-	| "mk"
-	| "fa"
-	| "md"
-	| "heatmap"
-	| "pseudocolor"
-	| "entropy"
-	| "pdf"
-	| "pseudocolor"
-	| "coherence"
-	| "entropy"
-	| "pdf"
-	| "render3d";
+type MapType = ViewerState["activeMap"];
 
 interface MapConfig {
 	id: MapType;
@@ -70,6 +60,8 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 	modality,
 	results,
 	baseUrl = API_BASE,
+	slicesMeta,
+	findingsPins,
 }) => {
 	const [viewerState, setViewerState] = useState<ViewerState>({
 		currentSlice: 0,
@@ -80,16 +72,23 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 		windowLevel: 40,
 		windowWidth: 400,
 		zoom: 1,
+		sliceOpacity: 100,
 	});
 
+	const [activePin, setActivePin] = useState<FindingPin | null>(null);
+	const [pinTooltipPos, setPinTooltipPos] = useState<{ x: number, y: number } | null>(null);
 	const canvasRef = useRef<HTMLCanvasElement>(null);
 	const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
 	const roiCanvasRef = useRef<HTMLCanvasElement>(null);
+	const pinTooltipCanvasRef = useRef<HTMLCanvasElement>(null);
 
 	// PDF viewer state
 	const [pdfNumPages, setPdfNumPages] = useState<number>(0);
 	const [pdfCurrentPage, setPdfCurrentPage] = useState<number>(1);
 	const [pdfScale, setPdfScale] = useState<number>(1.0);
+	
+	// MART v3: Virtual Lysis & Hemodynamics
+	const [selectedVoi, setSelectedVoi] = useState<number | null>(null);
 
 	// Bundle caches for each map type
 	const [sourceBundles, setSourceBundles] = useState<SliceBundle>({
@@ -128,6 +127,8 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 	});
 
 	const [showROI, setShowROI] = useState(false);
+	const [showPins, setShowPins] = useState(true);
+	const [showFindingsIndex, setShowFindingsIndex] = useState(false);
 
 	const [loadingProgress, setLoadingProgress] = useState(0);
 	const [error, setError] = useState<string | null>(null);
@@ -150,10 +151,11 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 		x: number;
 		y: number;
 		visible: boolean;
+		showText: boolean;
 		hu: number;
 		ci: number;
 		flowState: string;
-	}>({ x: 0, y: 0, visible: false, hu: 0, ci: 0, flowState: "" });
+	}>({ x: 0, y: 0, visible: false, showText: false, hu: 0, ci: 0, flowState: "" });
 
 	// Load source DICOM bundle on mount
 	useEffect(() => {
@@ -397,10 +399,10 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 		const maps: MapConfig[] = [
 			{
 				id: "source",
-				label: "Imagen Original",
-				shortLabel: "SRC",
+				label: "Heatmap",
+				shortLabel: "HEAT",
 				available: sourceBundles.loaded,
-				color: "#64748b",
+				color: "#ffffff",
 			},
 		];
 
@@ -460,6 +462,8 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 		}
 
 		if ((modality === "CT_TEP" || modality === "CT_SMART") && results) {
+			/* HEATMAP MERGED INTO SOURCE AS OVERLAY */
+			/*
 			if (results.heatmap || results.tep_heatmap) {
 				maps.push({
 					id: "heatmap",
@@ -469,6 +473,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 					color: "#ef4444",
 				});
 			}
+			*/
 			if (results.entropy_map) {
 				maps.push({
 					id: "entropy",
@@ -523,7 +528,10 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 
 		if (viewerState.activeMap === "heatmap") {
 			if (!heatmapBundle.loaded || !heatmapBundle.slices.length) return null;
-			// Map source slice index to heatmap slice index
+			// Show CT anatomy behind heatmap overlay
+			if (sourceBundles.loaded && sourceBundles.slices.length) {
+				return sourceBundles.slices[viewerState.currentSlice] || null;
+			}
 			const heatmapIdx = Math.min(
 				viewerState.currentSlice,
 				heatmapBundle.total_slices - 1,
@@ -544,6 +552,13 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 		if (viewerState.activeMap === "coherence") {
 			if (!coherenceBundle.loaded || !coherenceBundle.slices.length)
 				return null;
+			
+			// FIX: Return source slice to show anatomy "underneath" the overlay
+			// The Coherence Overlay is drawn on the overlayCanvas
+			if (sourceBundles.loaded && sourceBundles.slices.length) {
+				return sourceBundles.slices[viewerState.currentSlice] || null;
+			}
+
 			const idx = Math.min(
 				viewerState.currentSlice,
 				coherenceBundle.total_slices - 1,
@@ -770,7 +785,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 						? pseudocolorBundle.total_slices - 1
 						: viewerState.activeMap === "coherence"
 							? coherenceBundle.total_slices - 1
-							: heatmapBundle.total_slices - 1;
+							: heatmapBundle.total_slices - 1; // Keep heatmap for now, but it's an overlay
 			updateState({
 				currentSlice: Math.max(0, Math.min(slice, Math.max(0, maxSlice))),
 			});
@@ -815,16 +830,28 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 		img.onload = () => {
 			canvas.width = img.width;
 			canvas.height = img.height;
+			
+			// Apply Slice Opacity
+			// [UX FIX] Always render source CT at 100% opacity.
+			// The user only needs to control the overlay blend.
+			ctx.globalAlpha = 1.0;
 			ctx.drawImage(img, 0, 0);
 		};
 		img.src = imageUrl;
-	}, [getCurrentSliceUrl]);
+	}, [getCurrentSliceUrl]); // Removed viewerState.sliceOpacity dependency
 
 	// Render overlay if enabled
 	useEffect(() => {
 		const overlayCanvas = overlayCanvasRef.current;
 		const mainCanvas = canvasRef.current;
-		if (!overlayCanvas || !mainCanvas || !viewerState.showOverlay) return;
+		if (
+			!overlayCanvas ||
+			!mainCanvas ||
+			(viewerState.activeMap !== "source" && viewerState.activeMap !== "pseudocolor") ||
+			!heatmapBundle.loaded ||
+			!viewerState.showOverlay
+		)
+			return;
 
 		const ctx = overlayCanvas.getContext("2d");
 		if (!ctx) return;
@@ -998,11 +1025,8 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 	// RHEOLOGY MAGNIFIER TOOLTIP LOGIC
 	// ═══════════════════════════════════════════════════════════════════════════
 	const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-		if (viewerState.activeMap !== "coherence" || !coherenceBundle.loaded) {
-			if (hoverInfo.visible) setHoverInfo(prev => ({ ...prev, visible: false }));
-			return;
-		}
-
+		// [FIX] Allow Magnifier on ALL tabs, not just Coherence
+		// But only calculate Coherence metrics if on Coherence tab
 		const canvas = canvasRef.current;
 		if (!canvas) return;
 		
@@ -1014,7 +1038,9 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 		// Assuming canvas fills the container and maintains aspect ratio
 		// Note: We need the actual image dimensions relative to displayed canvas
 		const coherenceData = coherenceDataRef.current;
-		if (!coherenceData) return;
+		
+		// If on Coherence tab, proceed with Flow Analysis logic
+		if (viewerState.activeMap === "coherence" && coherenceBundle.loaded && coherenceData) {
 		
 		// Calculate scaling
 		const scaleX = coherenceData.width / rect.width;
@@ -1058,10 +1084,23 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 			x: e.clientX + 15,
 			y: e.clientY + 15,
 			visible: true,
+			showText: true,
 			hu: 0, // Placeholder as we don't have raw HU map here easily
 			ci: Number(ci.toFixed(2)),
 			flowState: flowState
 		});
+		} else {
+			// Generic Magnifier Update (for Source/Heatmap tabs)
+			setHoverInfo({
+				x: e.clientX + 15,
+				y: e.clientY + 15,
+				visible: true,
+				showText: false,
+				hu: 0, 
+				ci: 0,
+				flowState: ""
+			});
+		}
 		
 		// ═══════════════════════════════════════════════════════════════════════════
 		// MAGNIFIER LENS LOGIC
@@ -1117,6 +1156,15 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 							0, 0, lensCanvas.width, lensCanvas.height
 						);
 					}
+
+					// 3. Draw ROI if active (Green/Blue overlay)
+					if (showROI && roiCanvasRef.current && roiBundle.loaded) {
+						ctxLens.drawImage(
+							roiCanvasRef.current,
+							sx, sy, sourceW, sourceH,
+							0, 0, lensCanvas.width, lensCanvas.height
+						);
+					}
 					
 					// Add crosshair or border
 					ctxLens.strokeStyle = "rgba(168, 85, 247, 0.8)";
@@ -1134,7 +1182,166 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 			}
 		}
 
-	}, [viewerState.activeMap, coherenceBundle, hoverInfo.visible, isMagnifierActive, viewerState.showOverlay]);
+
+
+	}, [viewerState.activeMap, coherenceBundle, hoverInfo.visible, isMagnifierActive, viewerState.showOverlay, showROI, roiBundle]);
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// ═══════════════════════════════════════════════════════════════════════════
+	// PIN MAGNIFIER LOGIC (ROBUST LOAD + CROSSHAIR)
+	// ═══════════════════════════════════════════════════════════════════════════
+	useEffect(() => {
+		if (!activePin || !pinTooltipCanvasRef.current || !canvasRef.current) return;
+
+		const canvas = canvasRef.current;
+		const tooltipCanvas = pinTooltipCanvasRef.current;
+		const ctx = tooltipCanvas.getContext("2d");
+		if (!ctx) return;
+
+		// 1. Setup Coordinates
+		const px = activePin.location.coord_x;
+		const py = activePin.location.coord_y;
+		const sliceIndex = activePin.location.slice_z;
+
+		const zoom = 3.0;
+		const size = tooltipCanvas.width; // 250px
+		const srcW = size / zoom;
+		const srcH = size / zoom;
+		const sx = Math.max(0, px - srcW / 2);
+		const sy = Math.max(0, py - srcH / 2);
+
+		// 2. Draw Background CT (Immediate)
+		// Clear with black first
+		ctx.fillStyle = "black";
+		ctx.fillRect(0, 0, size, size);
+		// Draw CT Anatomy
+		ctx.drawImage(canvas, sx, sy, srcW, srcH, 0, 0, size, size);
+
+		// Helper to finalize the draw (Border + Crosshair)
+		const drawDecorations = () => {
+			// Draw Border
+			ctx.strokeStyle = activePin.type === "TEP_DEFINITE" ? "#ef4444" : "#f59e0b";
+			ctx.lineWidth = 4;
+			ctx.strokeRect(0, 0, size, size);
+
+			// Draw Center Crosshair (Target)
+			ctx.strokeStyle = "rgba(0, 255, 0, 0.5)";
+			ctx.lineWidth = 1;
+			ctx.beginPath();
+			ctx.moveTo(size / 2 - 10, size / 2);
+			ctx.lineTo(size / 2 + 10, size / 2);
+			ctx.moveTo(size / 2, size / 2 - 10);
+			ctx.lineTo(size / 2, size / 2 + 10);
+			ctx.stroke();
+		};
+
+		// 3. FORCE DRAW HEATMAP (Async)
+		if (heatmapBundle.loaded && heatmapBundle.slices[sliceIndex]) {
+			const heatmapUrl = heatmapBundle.slices[sliceIndex];
+			
+			if (heatmapUrl) {
+				const img = new Image();
+				img.crossOrigin = "Anonymous";
+				
+				img.onload = () => {
+					// Ensure component is still mounted/pin is still active
+					if (activePin.location.slice_z !== sliceIndex) return;
+
+					// Draw Heatmap Overlay with High Opacity
+					ctx.globalAlpha = 0.85; // 85% opacity to see through to bone/tissue but see red clearly
+					
+					// Draw the crop
+					ctx.drawImage(img, sx, sy, srcW, srcH, 0, 0, size, size);
+					
+					ctx.globalAlpha = 1.0; // Reset
+					drawDecorations();
+				};
+
+				img.onerror = (e) => {
+					console.error("Failed to load heatmap for pin magnifier", e);
+					drawDecorations();
+				};
+
+				img.src = heatmapUrl;
+			} else {
+				console.warn("Pin active but no heatmap URL for slice", sliceIndex);
+				drawDecorations();
+			}
+		} else {
+			// Fallback if heatmap bundle not ready
+			drawDecorations();
+		}
+		
+		// 4. Draw ROI (Optional context)
+		if (showROI && roiCanvasRef.current && roiBundle.loaded) {
+			ctx.globalAlpha = 0.3;
+			ctx.drawImage(roiCanvasRef.current, sx, sy, srcW, srcH, 0, 0, size, size);
+			ctx.globalAlpha = 1.0;
+		}
+
+		// Initial Decoration Draw (in case network is slow, show border immediately)
+		drawDecorations();
+
+	}, [activePin, heatmapBundle, showROI, roiBundle.loaded]);
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// VIRTUAL LYSIS: Handle Click on VOI
+	// ═══════════════════════════════════════════════════════════════════════════
+	const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+		if (viewerState.activeMap !== "coherence" || !results?.voi_findings) return;
+		
+		const canvas = canvasRef.current;
+		if (!canvas) return;
+		
+		const rect = canvas.getBoundingClientRect();
+		// Map click to image coordinates (similar to handleMouseMove)
+        
+		const scaleX = canvas.width / rect.width;
+		const scaleY = canvas.height / rect.height;
+		
+		const mouseX = (e.clientX - rect.left) * scaleX;
+		const mouseY = (e.clientY - rect.top) * scaleY;
+		
+		// Find intersected VOI in current slice
+		const z = viewerState.currentSlice;
+		
+		// Map backend findings to current slice
+		const candidates = (results.voi_findings as VoiFinding[]).filter(v => 
+			z >= v.slice_range[0] && z <= v.slice_range[1]
+		);
+		
+		if (candidates.length === 0) {
+			setSelectedVoi(null);
+			return;
+		}
+		
+		// Find closest (Euclidean distance to centroid in 2D)
+		let closest: VoiFinding | null = null;
+		let minLoadingDist = 10000;
+		
+		candidates.forEach(v => {
+			// Centroid is [z, y, x]
+			const cy = v.centroid[1];
+			const cx = v.centroid[2];
+			
+			// Simple distance check
+			const dist = Math.sqrt(Math.pow(mouseX - cx, 2) + Math.pow(mouseY - cy, 2));
+			
+			// Threshold: 30px radius
+			if (dist < 40 && dist < minLoadingDist) {
+				minLoadingDist = dist;
+				closest = v;
+			}
+		});
+		
+		if (closest) {
+			// Explicit cast to avoid 'never' inference if candidates is empty in some flow
+			setSelectedVoi((closest as VoiFinding).id);
+		} else {
+			setSelectedVoi(null);
+		}
+		
+	}, [viewerState.activeMap, results, viewerState.currentSlice]);
 
 	// Loading state
 	if (sourceBundles.loading) {
@@ -1265,7 +1472,30 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 					</button>
 				))}
 
-				{/* Overlay Toggle */}
+				{/* Diagnostic Toggles */}
+				{(modality === "CT_TEP" || modality === "CT_SMART") && findingsPins && findingsPins.length > 0 && (
+					<div style={{ display: "flex", gap: "8px", borderLeft: "1px solid #334155", paddingLeft: "8px", marginLeft: "8px" }}>
+						<button
+							className={`viewer-tab ${showPins ? "active" : ""}`}
+							onClick={() => setShowPins(!showPins)}
+							style={{ padding: "4px 8px", fontSize: "0.75rem", gap: "4px" }}
+							title="Mostrar/Ocultar Pines de Hallazgos"
+						>
+							<span style={{ fontSize: "0.8rem" }}>📍</span>
+							{showPins ? "Ocultar Pines" : "Mostrar Pines"}
+						</button>
+						<button
+							className={`viewer-tab ${showFindingsIndex ? "active" : ""}`}
+							onClick={() => setShowFindingsIndex(!showFindingsIndex)}
+							style={{ padding: "4px 8px", fontSize: "0.75rem", gap: "4px" }}
+							title="Mostrar/Ocultar Índice de Hallazgos"
+						>
+							<span style={{ fontSize: "0.8rem" }}>📋</span>
+							Hallazgos
+						</button>
+					</div>
+				)}
+
 				<div
 					style={{
 						marginLeft: "auto",
@@ -1647,17 +1877,147 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 			) : (
 				/* Image Viewer Container */
 				<div className="viewer-container" onWheel={handleWheel}>
-					{/* Main Canvas */}
-					<canvas
-						ref={canvasRef}
-						className="viewer-canvas"
-						onMouseMove={handleMouseMove}
-						onMouseLeave={() => setHoverInfo(prev => ({ ...prev, visible: false }))}
-						style={{
+					{/* Canvas Wrapper for Zoom/Pan and Alignment */}
+					<div 
+						style={{ 
+							position: "relative",
+							width: "fit-content",
+							height: "fit-content",
 							transform: `scale(${viewerState.zoom})`,
+							transformOrigin: "center center",
+							transition: "transform 0.1s ease-out"
 						}}
-					/>
+					>
+						{/* Main Canvas */}
+						<canvas
+							ref={canvasRef}
+							className="viewer-canvas"
+							onMouseMove={handleMouseMove}
+							onClick={handleCanvasClick}
+							onMouseLeave={() => setHoverInfo(prev => ({ ...prev, visible: false }))}
+							style={{ display: "block" }} // Block to avoid line-height spacing
+						/>
+
+						{/* Overlay Canvas */}
+						{viewerState.showOverlay && (
+							<canvas
+								ref={overlayCanvasRef}
+								className="viewer-canvas"
+								style={{
+									position: "absolute",
+									inset: 0,
+									width: "100%",
+									height: "100%",
+									pointerEvents: "none",
+									opacity: viewerState.blendOpacity / 100,
+								}}
+							/>
+						)}
+
+						{/* ROI Canvas */}
+						{showROI && roiBundle.loaded && (
+							<canvas
+								ref={roiCanvasRef}
+								className="viewer-canvas"
+								style={{
+									position: "absolute",
+									inset: 0,
+									width: "100%",
+									height: "100%",
+									pointerEvents: "none",
+									opacity: 0.5,
+								}}
+							/>
+						)}
+
+						{/* Diagnostic Pins Overlay */}
+						{showPins && findingsPins && (viewerState.activeMap as string) !== "render3d" && (
+							<div
+								style={{
+									position: "absolute",
+									inset: 0,
+									pointerEvents: "none",
+									overflow: "visible",
+								}}
+							>
+								{findingsPins
+									.filter(pin => {
+										const z = pin.location.slice_z;
+										// Only show if slice matches AND exists within current volume (Anti-Ghosting)
+										return z === viewerState.currentSlice && z < viewerState.totalSlices;
+									})
+									.map(pin => (
+										<div
+											key={pin.id}
+											onMouseEnter={(e) => {
+												setActivePin(pin);
+												const rect = e.currentTarget.getBoundingClientRect();
+												setPinTooltipPos({ x: rect.right + 10, y: rect.top });
+											}}
+											onMouseLeave={() => {
+												setActivePin(null);
+												setPinTooltipPos(null);
+											}}
+											style={{
+												position: "absolute",
+												// Position logic assuming 512x512 base. 
+												// Using percentage to be resolution independent if canvas scales.
+												left: `${(pin.location.coord_x / 512) * 100}%`,
+												top: `${(pin.location.coord_y / 512) * 100}%`,
+												transform: "translate(-50%, -100%)", // Pin tip at location
+												display: "flex",
+												alignItems: "center",
+												justifyContent: "center",
+												cursor: "pointer",
+												pointerEvents: "auto",
+												zIndex: 40,
+											}}
+										>
+											<span style={{ fontSize: "1.5rem", filter: "drop-shadow(0 2px 2px rgba(0,0,0,0.8))" }}>
+												📌
+											</span>
+										</div>
+									))}
+							</div>
+						)}
+					</div>					
 					
+					{/* Pin Tooltip (Magnified) */}
+					{activePin && pinTooltipPos && (
+						<div
+							style={{
+								position: "fixed",
+								left: pinTooltipPos.x,
+								top: pinTooltipPos.y - 75, // Center vertically roughly
+								background: "rgba(15, 23, 42, 0.95)",
+								border: "1px solid #475569",
+								borderRadius: "8px",
+								padding: "8px",
+								zIndex: 200,
+								pointerEvents: "none",
+								boxShadow: "0 10px 15px -3px rgba(0, 0, 0, 0.5)",
+								display: "flex",
+								flexDirection: "column",
+								gap: "4px"
+							}}
+						>
+							<div style={{ fontWeight: "bold", color: "#e2e8f0", fontSize: "0.85rem", borderBottom: "1px solid #334155", paddingBottom: "4px" }}>
+								Hallazgo #{activePin.id}
+							</div>
+							<canvas
+								ref={pinTooltipCanvasRef}
+								width="250"
+								height="250"
+								style={{ borderRadius: "4px", background: "black" }}
+							/>
+							<div style={{ fontSize: "0.75rem", color: activePin.type === "TEP_DEFINITE" ? "#ef4444" : "#f59e0b" }}>
+								{activePin.type === "TEP_DEFINITE" ? "Trombo Definido" : "Sospecha"}
+							</div>
+							<div style={{ fontSize: "0.7rem", color: "#94a3b8" }}>
+								Score: {activePin.tooltip_data.score_total.toFixed(2)}
+							</div>
+						</div>
+					)}					
 					{/* Magnifier Lens */}
 					{isMagnifierActive && hoverInfo.visible && (
 						<div
@@ -1689,7 +2049,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 					)}
 
 					{/* Rheology Magnifier Tooltip */}
-					{hoverInfo.visible && (
+					{hoverInfo.visible && hoverInfo.showText && (
 						<div
 							style={{
 								position: "fixed",
@@ -1722,36 +2082,119 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 						</div>
 					)}
 
-					{/* Overlay Canvas */}
-					{viewerState.showOverlay && (
-						<canvas
-							ref={overlayCanvasRef}
-							className="viewer-canvas"
+
+
+					{/* Diagnostic Pins Overlay */}
+
+					
+					{/* Findings Index Panel */}
+					{showFindingsIndex && findingsPins && (
+						<div
+							onWheel={(e) => e.stopPropagation()}
 							style={{
 								position: "absolute",
-								pointerEvents: "none",
-								transform: `scale(${viewerState.zoom})`,
-								opacity: viewerState.blendOpacity / 100,
+								top: "50px",
+								left: "10px",
+								width: "250px",
+								maxHeight: "80%",
+								background: "rgba(15, 23, 42, 0.95)",
+								border: "1px solid #334155",
+								borderRadius: "8px",
+								display: "flex",
+								flexDirection: "column",
+								zIndex: 60,
+								boxShadow: "0 4px 12px rgba(0,0,0,0.5)",
+								backdropFilter: "blur(4px)",
 							}}
-						/>
+						>
+							<div style={{
+								padding: "10px",
+								borderBottom: "1px solid #334155",
+								display: "flex",
+								justifyContent: "space-between",
+								alignItems: "center",
+								fontWeight: "bold",
+								color: "#e2e8f0"
+							}}>
+								<span>📋 Hallazgos ({findingsPins.length})</span>
+								<button
+									onClick={() => setShowFindingsIndex(false)}
+									style={{ background: "transparent", border: "none", color: "#94a3b8", cursor: "pointer" }}
+								>
+									✕
+								</button>
+							</div>
+							<div style={{ overflowY: "auto", padding: "8px", display: "flex", flexDirection: "column", gap: "6px" }}>
+								{findingsPins.map(pin => (
+									<div
+										key={pin.id}
+										onClick={() => {
+											updateState({ currentSlice: pin.location.slice_z });
+										}}
+										style={{
+											padding: "8px",
+											background: viewerState.currentSlice === pin.location.slice_z ? "rgba(59, 130, 246, 0.2)" : "rgba(255,255,255,0.05)",
+											border: viewerState.currentSlice === pin.location.slice_z ? "1px solid #3b82f6" : "1px solid transparent",
+											borderRadius: "6px",
+											cursor: "pointer",
+											display: "flex",
+											alignItems: "center",
+											gap: "8px"
+										}}
+									>
+										<span>{pin.type === "TEP_DEFINITE" ? "📍" : "📌"}</span>
+										<div style={{ flex: 1 }}>
+											<div style={{ fontSize: "0.85rem", fontWeight: "bold", color: pin.type === "TEP_DEFINITE" ? "#ef4444" : "#f59e0b" }}>
+												{pin.type === "TEP_DEFINITE" ? "Trombo Definido" : "Sospecha"}
+											</div>
+											<div style={{ fontSize: "0.75rem", color: "#94a3b8" }}>
+												Slice {pin.location.slice_z + 1} • Score {pin.tooltip_data.score_total.toFixed(1)}
+											</div>
+										</div>
+									</div>
+								))}
+							</div>
+						</div>
 					)}
 
-					{/* ROI Canvas */}
-					{showROI && roiBundle.loaded && (
-						<canvas
-							ref={roiCanvasRef}
-							className="viewer-canvas"
-							style={{
-								position: "absolute",
-								pointerEvents: "none",
-								transform: `scale(${viewerState.zoom})`,
-								opacity: 0.5,
-							}}
-						/>
-					)}
 
-					{/* Slice Navigator */}
+
+					{/* Slice Navigator with Smart Ticks */}
 					<div className="slice-navigator">
+						{/* Smart Ticks - Heatmap (Red) */}
+						{slicesMeta?.alerts_heatmap?.map(sliceIdx => (
+							<div
+								key={`hm-${sliceIdx}`}
+								style={{
+									position: "absolute",
+									left: `${(sliceIdx / (currentTotalSlices - 1)) * 100}%`,
+									top: "-6px",
+									width: "2px",
+									height: "6px",
+									background: "#ef4444",
+									zIndex: 10,
+									pointerEvents: "none",
+								}}
+							/>
+						))}
+						
+						{/* Smart Ticks - Flow (Purple) */}
+						{slicesMeta?.alerts_flow?.map(sliceIdx => (
+							<div
+								key={`flow-${sliceIdx}`}
+								style={{
+									position: "absolute",
+									left: `${(sliceIdx / (currentTotalSlices - 1)) * 100}%`,
+									bottom: "-6px", // Below the slider
+									width: "2px",
+									height: "6px",
+									background: "#a855f7",
+									zIndex: 10,
+									pointerEvents: "none",
+								}}
+							/>
+						))}
+
 						<div className="slice-info">Corte</div>
 						<input
 							type="range"
@@ -1759,6 +2202,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 							max={Math.max(0, currentTotalSlices - 1)}
 							value={viewerState.currentSlice}
 							onChange={e => handleSliceChange(parseInt(e.target.value))}
+							style={{ zIndex: 20, position: "relative" }}
 						/>
 						<div className="slice-info">
 							{viewerState.currentSlice + 1} / {currentTotalSlices}
@@ -1770,7 +2214,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 						{/* Blend Control */}
 						{viewerState.showOverlay && (
 							<div className="viewer-control-group">
-								<span className="viewer-control-label">Mezcla</span>
+								<span className="viewer-control-label">Mezcla / Color</span>
 								<input
 									type="range"
 									className="viewer-slider"
@@ -1787,6 +2231,8 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 								
 							</div>
 						)}
+
+
 
 						{/* Magnifier Toggle (Always Visible) */}
 						<button
@@ -1871,6 +2317,137 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 							Cargando mapa de calor...
 						</div>
 					)}
+				</div>
+			)}
+			
+			{/* ══════════════════════════════════════════════════════════════════════ */}
+			{/* HEMODYNAMIC DASHBOARD (MART v3) - Active on Coherence Map */}
+			{/* ══════════════════════════════════════════════════════════════════════ */}
+			{viewerState.activeMap === "coherence" && results?.estimated_mpap && (
+				<div
+					style={{
+						position: "absolute",
+						top: "20px",
+						right: "20px",
+						width: "300px",
+						background: "rgba(15, 23, 42, 0.95)",
+						border: "1px solid #3b82f6", // Blue border for "Engineering" look
+						borderRadius: "12px",
+						padding: "16px",
+						color: "white",
+						boxShadow: "0 10px 25px -5px rgba(0, 0, 0, 0.6)",
+						zIndex: 50,
+						fontSize: "0.85rem",
+						backdropFilter: "blur(8px)",
+						fontFamily: "'Inter', sans-serif"
+					}}
+				>
+					<div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "12px", borderBottom: "1px solid #334155", paddingBottom: "8px" }}>
+						<div style={{ fontWeight: "bold", fontSize: "0.95rem", color: "#60a5fa" }}>
+							⚡ Hemodinámica (Estimada)
+						</div>
+						<div style={{ fontSize: "0.7rem", padding: "2px 6px", borderRadius: "10px", background: "rgba(96, 165, 250, 0.2)", color: "#60a5fa"}}>
+							MART v3
+						</div>
+					</div>
+					
+					{/* Key Metrics Grid */}
+					<div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "16px" }}>
+						<div style={{ background: "rgba(255,255,255,0.05)", padding: "10px", borderRadius: "8px" }}>
+							<div style={{ color: "#94a3b8", fontSize: "0.75rem", marginBottom: "4px" }}>mPAP</div>
+							<div style={{ fontSize: "1.2rem", fontWeight: "bold", color: results.estimated_mpap > 25 ? "#ef4444" : "#22c55e" }}>
+								{results.estimated_mpap.toFixed(1)} <span style={{fontSize: "0.8rem"}}>mmHg</span>
+							</div>
+						</div>
+						<div style={{ background: "rgba(255,255,255,0.05)", padding: "10px", borderRadius: "8px" }}>
+							<div style={{ color: "#94a3b8", fontSize: "0.75rem", marginBottom: "4px" }}>PVR</div>
+							<div style={{ fontSize: "1.2rem", fontWeight: "bold", color: (results.pvr_wood_units || 0) > 3 ? "#ef4444" : "#22c55e" }}>
+								{results.pvr_wood_units?.toFixed(2)} <span style={{fontSize: "0.8rem"}}>WU</span>
+							</div>
+						</div>
+					</div>
+					
+					{/* RV Impact Bar */}
+					<div style={{ marginBottom: "16px" }}>
+						<div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px", fontSize: "0.8rem" }}>
+							<span style={{ color: "#94a3b8" }}>Impacto VD (Sobrecarga)</span>
+							<span style={{ fontWeight: "bold", color: (results.rv_impact_index || 0) > 0.5 ? "#f59e0b" : "#94a3b8" }}>
+								{Math.round((results.rv_impact_index || 0) * 100)}%
+							</span>
+						</div>
+						<div style={{ height: "6px", width: "100%", background: "#334155", borderRadius: "3px", overflow: "hidden" }}>
+							<div 
+								style={{ 
+									height: "100%", 
+									width: `${Math.min(100, (results.rv_impact_index || 0) * 100)}%`,
+									background: "linear-gradient(90deg, #22c55e, #eab308, #ef4444)", // Green -> Yellow -> Red
+									borderRadius: "3px"
+								}} 
+							/>
+						</div>
+					</div>
+					
+					{/* Intervention Target / Selected VOI */}
+					<div style={{ borderTop: "1px solid #334155", paddingTop: "12px" }}>
+						<div style={{ fontSize: "0.8rem", color: "#94a3b8", marginBottom: "8px", display: "flex", justifyContent: "space-between" }}>
+							<span>🎯 Objetivo Intervención</span>
+							{selectedVoi && <span style={{color: "#a855f7", fontWeight: "bold"}}>VOI #{selectedVoi}</span>}
+						</div>
+						
+						{selectedVoi ? (
+							(results.voi_findings?.find(v => v.id === selectedVoi)) ? (
+								(() => {
+									const v = results.voi_findings?.find(v => v.id === selectedVoi);
+									return (
+										<div style={{ background: "rgba(168, 85, 247, 0.1)", border: "1px solid rgba(168, 85, 247, 0.3)", borderRadius: "8px", padding: "10px" }}>
+											<div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+												<span style={{ fontSize: "0.75rem", color: "#d8b4fe" }}>Recuperación Flujo (FAC):</span>
+												<span style={{ fontWeight: "bold", color: "#a855f7" }}>+{v?.predicted_recovery_fac?.toFixed(2)}</span>
+											</div>
+											<div style={{ display: "flex", justifyContent: "space-between" }}>
+												<span style={{ fontSize: "0.75rem", color: "#d8b4fe" }}>Volumen Trombo:</span>
+												<span style={{ fontWeight: "bold", color: "white" }}>{v?.volume.toFixed(1)} ml</span>
+											</div>
+											<div style={{ marginTop: "8px", fontSize: "0.7rem", color: "#94a3b8", fontStyle: "italic" }}>
+												*Simulación de Virtual Lysis aplicada.
+											</div>
+										</div>
+									);
+								})()
+							) : null
+						) : (
+							<div 
+								style={{ 
+									fontSize: "0.75rem", 
+									color: "#64748b", 
+									textAlign: "center", 
+									padding: "10px", 
+									border: "1px dashed #475569", 
+									borderRadius: "8px",
+									cursor: "pointer"
+								}}
+								onClick={() => {
+									// Auto-select primary target if available
+									if (results.primary_intervention_target) {
+                                         // Logic to parse ID from "Lesion #X" or just assume ID matches
+                                         // primary_intervention_target is distinct ID?
+                                         // Let's assume it stores the ID directly or string
+                                         // In backend: primary_target_id = candidates[0]['id'] -> Integer
+                                         // But model field is CharField.
+                                         const targetId = parseInt(results.primary_intervention_target as string);
+                                         if (!isNaN(targetId)) setSelectedVoi(targetId);
+                                    }
+								}}
+							>
+								Clic en una lesión para simular lisis
+								{results.primary_intervention_target && (
+									<div style={{ marginTop: "4px", color: "#eab308", fontWeight: "bold" }}>
+										Sugerido: VOI #{results.primary_intervention_target}
+									</div>
+								)}
+							</div>
+						)}
+					</div>
 				</div>
 			)}
 		</>

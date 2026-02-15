@@ -15,6 +15,7 @@ import {
 } from "../services/api";
 import styles from "./StudyDetail.module.css";
 import TEPViewer from "../components/TEPViewer";
+import DiagnosticStation from "../components/DiagnosticStation";
 
 const TEPStudyDetail: React.FC = () => {
 	const { id } = useParams<{ id: string }>();
@@ -104,6 +105,12 @@ const TEPStudyDetail: React.FC = () => {
 		? result.tep_roi_heatmap.startsWith("http")
 			? result.tep_roi_heatmap
 			: `http://localhost:8000${result.tep_roi_heatmap}`
+		: null;
+
+	const sourceUrl = result?.source_volume
+		? result.source_volume.startsWith("http")
+			? result.source_volume
+			: `http://localhost:8000${result.source_volume}`
 		: null;
 
 	const statusClass =
@@ -395,6 +402,7 @@ const TEPStudyDetail: React.FC = () => {
 						<div className={styles.visualizationSection}>
 							<TEPViewer
 								heatmapUrl={heatmapUrl}
+							sourceUrl={sourceUrl || undefined}
 								thrombusUrl={thrombusUrl || undefined}
 								paUrl={paUrl || undefined}
 								roiUrl={roiUrl || undefined}
@@ -471,6 +479,17 @@ const TEPStudyDetail: React.FC = () => {
 									</a>
 								)}
 							</div>
+						</div>
+					)}
+
+					{/* Diagnostic Station - 2D Slice Viewer with Smart Scrollbar, Pins & Magnifier */}
+					{study.status === "COMPLETED" && id && (
+						<div className={styles.visualizationSection} style={{ marginTop: "1.5rem" }}>
+							<DiagnosticStation
+								studyId={id}
+								slicesMeta={result?.slices_meta}
+								findingsPins={result?.findings_pins}
+							/>
 						</div>
 					)}
 

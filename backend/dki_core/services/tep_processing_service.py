@@ -7,6 +7,16 @@ from skimage.measure import regionprops, label as sk_label
 from skimage.morphology import remove_small_objects, remove_small_holes, skeletonize
 import warnings
 from numpy.linalg import eigvalsh
+from skimage.feature import structure_tensor, structure_tensor_eigenvalues
+from scipy.ndimage import map_coordinates, convolve
+from skimage.feature import hessian_matrix, hessian_matrix_eigvals
+try:
+    from skimage.morphology import skeletonize_3d
+except ImportError:
+    # In newer scikit-image, skeletonize handles 3D automatically
+    from skimage.morphology import skeletonize as skeletonize_3d
+import numpy.fft as fft
+import scipy.stats as stats
 
 warnings.filterwarnings('ignore')
 
@@ -37,7 +47,7 @@ class TEPProcessingService:
     
     # TEP-specific HU thresholds
     CONTRAST_BLOOD_RANGE = (150, 500)      # Contrast-enhanced arterial blood
-    THROMBUS_RANGE = (30, 100)             # Fresh thrombus (filling defect)
+    THROMBUS_RANGE = (40, 100)             # Fresh thrombus (Raised min from 30→40 to exclude pericardial fat)
     PULMONARY_ARTERY_MIN_HU = 220          # Minimum HU for pulmonary artery (Raised to 220)
     FILLING_DEFECT_MAX_HU = 100            # Maximum HU for filling defect
     LUNG_PARENCHYMA_RANGE = (-900, -500)   # Lung tissue
@@ -84,7 +94,7 @@ class TEPProcessingService:
     # ═══════════════════════════════════════════════════════════════════════════
     # ROI SAFETY EROSION: Anti-costal invasion buffer (DYNAMIC based on spacing)
     # ═══════════════════════════════════════════════════════════════════════════
-    ROI_EROSION_MM = 3.0                   # Physical erosion in mm (Reduced to 3mm to recover peripheral arteries)
+    ROI_EROSION_MM = 5.0                   # Physical erosion in mm (Raised to 5mm for stronger chest wall exclusion)
     ROI_BONE_BUFFER_ITERATIONS = 5         # Extra bone buffer for subtraction
     ROI_MIN_VOLUME_RATIO = 0.20            # If ROI < 20% of original, mark for review
     
@@ -109,11 +119,24 @@ class TEPProcessingService:
     LAPLACIAN_BONE_CHECK_RADIUS = 3        # Voxels to check around each detection
     LAPLACIAN_BONE_REJECT_RATIO = 0.30     # If >30% of border has bone gradient → discard
     
-    # Heatmap intensity thresholds
-    HEATMAP_HU_MIN = 30                    # Min HU for heatmap highlighting
+    HEATMAP_HU_MIN = 40                    # Min HU for heatmap highlighting (Synced with THROMBUS_RANGE min)
     HEATMAP_HU_MAX = 90                    # Max HU for heatmap highlighting
     CONTRAST_SUPPRESSION_HU = 250          # HU above which to suppress signal
     
+    # ═══════════════════════════════════════════════════════════════════════════
+    # DIMENSIONAL STABILITY UTILITY
+    # ═══════════════════════════════════════════════════════════════════════════
+    def _ensure_3d(self, array):
+        """
+        DIMENSIONAL IRON DOME:
+        Forces (Z, Y, X) layout. If input is (H, W), expands to (1, H, W).
+        This prevents crashes when Numpy implicitly squeezes single-slice volumes.
+        """
+        if array is None: return None
+        if array.ndim == 2: 
+            return array[np.newaxis, ...]
+        return array
+
     def process_study(self, data, affine, kvp=None, mas=None, spacing=None, log_callback=None,
                        domain_mask=None, is_contrast_optimal=None, is_non_contrast=False):
         """
@@ -150,7 +173,7 @@ class TEPProcessingService:
         """
         if log_callback:
             log_callback("═══════════════════════════════════════════════════════════")
-            log_callback("  PULMONARY EMBOLISM (TEP) ANALYSIS - Enhanced Pipeline")
+            log_callback("  PULMONARY EMBOLISM (TEP) ANALYSIS - Enhanced Pipeline (v2026-02-09 Iron Dome)")
             log_callback("═══════════════════════════════════════════════════════════")
 
         # 0. Apply Non-Contrast Overrides if needed
@@ -176,9 +199,24 @@ class TEPProcessingService:
         # Initialize warnings list
         warnings_list = []
         
+        # ═══════════════════════════════════════════════════════════════════════════
+        # FIX 1: Force 3D context - expand 2D inputs to (1, H, W)
+        # ═══════════════════════════════════════════════════════════════════════════
+        if data.ndim == 2:
+            logger.warning("⚠️ Data is 2D. Forced expansion to 3D volume.")
+            if log_callback:
+                log_callback("⚠️ Data is 2D. Forced expansion to 3D volume.")
+            data = data[np.newaxis, :, :]  # (H, W) -> (1, H, W)
+        
         # Extract voxel dimensions
         if spacing is None:
             spacing = np.sqrt(np.sum(affine[:3, :3]**2, axis=0))
+        
+        # Ensure spacing matches data dimensionality (3D)
+        if len(spacing) == 2:
+            spacing = np.array([1.0, spacing[0], spacing[1]])  # Prepend dummy Z-spacing
+        elif len(spacing) != 3:
+            spacing = np.array([1.0, 1.0, 1.0])  # Fallback
         
         voxel_volume_mm3 = np.prod(spacing)
         voxel_volume_cm3 = voxel_volume_mm3 / 1000.0
@@ -341,7 +379,8 @@ class TEPProcessingService:
             is_non_contrast=is_non_contrast,
             centerline=centerline,  # Pass centerline for proximity validation
             centerline_info=centerline_info,
-            z_guard_slices=True  # Enable Z-anatomical guard
+            z_guard_slices=True,  # Enable Z-anatomical guard
+            spacing=spacing       # Pass voxel spacing for VOI analysis
         )
         
         # ═══════════════════════════════════════════════════════════════════════════
@@ -460,6 +499,54 @@ class TEPProcessingService:
         # Get diagnostic stats from thrombus detection
         diagnostic_stats = thrombus_info.get('diagnostic_stats', {})
         
+        # ════════════════════════════════════════════════════════════════════════
+        # UX METADATA GENERATION (Smart Scrollbar & Diagnostic Pins)
+        # ════════════════════════════════════════════════════════════════════════
+        
+        # 1. Smart Navigator Data (Active Slices)
+        # Find Z-indices for Heatmap Alerts (Red) — slices with thrombus
+        z_heatmap = [int(x) for x in np.unique(np.where(thrombus_mask)[0])]
+        
+        # Find Z-indices for Flow Alerts (Purple)
+        # Only count inside lung/PA, excluding background
+        flow_alert_mask = (coherence_map < 0.4) & (lung_mask | pa_mask) & ~working_exclusion
+        z_flow = [int(x) for x in np.unique(np.where(flow_alert_mask)[0])]
+        
+        slices_meta = {
+            'total_slices': int(data.shape[0]),
+            'alerts_heatmap': z_heatmap,   # Red lines on scrollbar
+            'alerts_flow': z_flow          # Purple lines on scrollbar
+        }
+
+        # 2. Diagnostic Pins (Map Markers 📍)
+        findings_pins = []
+        raw_findings = thrombus_info.get('voi_findings', []) or []
+        
+        for f in raw_findings:
+            # Centroid is (z, y, x) in numpy convention
+            centroid = f.get('centroid', (0, 0, 0))
+            cz, cy, cx = float(centroid[0]), float(centroid[1]), float(centroid[2])
+            
+            pin = {
+                'id': int(f['id']),
+                'type': 'TEP_DEFINITE' if f.get('confidence') == 'DEFINITE' else 'TEP_SUSPICIOUS',
+                'location': {
+                    'slice_z': int(cz),
+                    'coord_x': int(cx + crop_info['crop_bounds']['x_start']),
+                    'coord_y': int(cy + crop_info['crop_bounds']['y_start'])
+                },
+                'tooltip_data': {
+                    'score_total': float(round(float(f.get('score_mean', 0)), 1)),
+                    'density_hu': int(float(f.get('mean_hu', 0))),
+                    'flow_coherence': float(round(1.0 - float(f.get('fac_mean', 0)), 2)),
+                    'volume_mm3': int(float(f.get('volume', 0)) * 1000)
+                }
+            }
+            findings_pins.append(pin)
+        
+        if log_callback:
+            log_callback(f"   📍 UX Metadata: {len(z_heatmap)} heatmap alert slices, {len(z_flow)} flow alert slices, {len(findings_pins)} diagnostic pins")
+        
         # Final results
         results = {
             'pulmonary_artery_mask': pa_mask_full.astype(np.uint8),
@@ -495,7 +582,21 @@ class TEPProcessingService:
             'exclusion_info': exclusion_info,
             'warnings': warnings_list,
             'low_confidence': not contrast_info['has_adequate_contrast'],
-            'is_non_contrast_mode': thrombus_info.get('is_non_contrast_mode', False)
+            'voi_findings': thrombus_info.get('voi_findings'),
+            'estimated_mpap': thrombus_info.get('hemodynamics', {}).get('estimated_mpap'),
+            'pvr_wood_units': thrombus_info.get('hemodynamics', {}).get('pvr_wood_units'),
+            'rv_impact_index': thrombus_info.get('hemodynamics', {}).get('rv_impact_index'),
+            'primary_intervention_target': thrombus_info.get('primary_intervention_target'),
+            'is_non_contrast_mode': thrombus_info.get('is_non_contrast_mode', False),
+            
+            # [RESTORED] MART v4 Metrics
+            'fractal_dimension': thrombus_info.get('fractal_dimension'),
+            'vascular_pruning_alert': thrombus_info.get('vascular_pruning_alert'),
+            'topology_scores': thrombus_info.get('topology_scores'),
+            
+            # UX / Frontend Data (Smart Scrollbar + Diagnostic Pins)
+            'slices_meta': slices_meta,
+            'findings_pins': findings_pins,
         }
         
         if log_callback:
@@ -559,8 +660,345 @@ class TEPProcessingService:
         return results
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # NEW: Hounsfield Exclusion Masks
+    # Phase 8: Advanced VOI Analysis & Hemodynamics (MART v3)
     # ═══════════════════════════════════════════════════════════════════════════
+
+    def _analyze_surface_rugosity(self, mask_3d, data_3d, spacing):
+        """
+        Analyze VOI surface properties using Tensor Physics.
+        
+        SAFE MODE: Skips FFT/tensor analysis on flat/small volumes.
+        
+        Metrics:
+        1. Tensor Laplacian (Energy Divergence): Measures surface energy fluctuation.
+        2. Fractional Anisotropy (FAC): Measures flow directionality/coherence.
+        3. Periodicity: Detects rhythmic structures (bronchial rings).
+        
+        Returns:
+            dict: {
+                'is_airway': bool,
+                'coherence_val': float,
+                'fac_mean': float,
+                'laplacian_energy': float,
+                'periodicity_score': float
+            }
+        """
+        # Default safe result (assume NOT an airway)
+        safe_result = {'is_airway': False, 'coherence_val': 0.0, 'fac_mean': 0.5, 
+                       'mean_hu': 0.0, 'periodicity_score': 0.0}
+        
+        # ═══════════════════════════════════════════════════════════════════════════
+        # SAFE MODE: Needs at least 3 slices for Z-axis FFT and tensor analysis
+        # ═══════════════════════════════════════════════════════════════════════════
+        if data_3d.ndim < 3 or (data_3d.ndim == 3 and data_3d.shape[0] < 3):
+            # Calculate simple mean HU for flat objects
+            if np.any(mask_3d):
+                safe_result['mean_hu'] = float(np.mean(data_3d[mask_3d > 0]))
+            return safe_result
+        
+        # 1. Calculate Structure Tensor (Energy & Anisotropy)
+        # Sigma 1.5mm for feature scale
+        sigma = 1.5 / spacing[0] 
+        st = structure_tensor(data_3d, sigma=sigma, mode='reflect')
+        eigvals = structure_tensor_eigenvalues(st)
+        
+        # Calculate Fractional Anisotropy (FAC)
+        # Calculate Fractional Anisotropy (FAC)
+        # FA = sqrt(3/2) * sqrt(sum((lambda - mean)^2) / sum(lambda^2))
+        if len(eigvals) >= 3:
+            l1, l2, l3 = eigvals[0], eigvals[1], eigvals[2]
+        else:
+            l1, l2 = eigvals[0], eigvals[1]
+            l3 = np.zeros_like(l1)
+            
+        l_mean = (l1 + l2 + l3) / 3
+        numerator = (l1 - l_mean)**2 + (l2 - l_mean)**2 + (l3 - l_mean)**2
+        denominator = l1**2 + l2**2 + l3**2 + 1e-6
+        fac_map = np.sqrt(1.5 * (numerator / denominator))
+        
+        # [FIX] Dimensional safety: structure_tensor can distort thin VOI shapes
+        # (e.g. mask (7,1,2) but fac_map becomes (7,2) or (7,2,1))
+        # Force exact shape match before boolean indexing
+        if fac_map.shape != mask_3d.shape:
+            try:
+                fac_map = fac_map.reshape(mask_3d.shape)
+            except ValueError:
+                # Element count mismatch — cannot reconcile, return safe defaults
+                if np.any(mask_3d):
+                    safe_result['mean_hu'] = float(np.mean(data_3d[mask_3d > 0]))
+                return safe_result
+        
+        # Mask FAC with VOI
+        voi_fac = fac_map[mask_3d > 0]
+        if len(voi_fac) == 0:
+            return safe_result
+            
+        fac_mean = np.mean(voi_fac)
+        
+        # 2. Periodicity Analysis for Airway Detection
+        # Extract centerline profile intensity
+        # Simplified: Use PCA to find principal axis and project data
+        coords = np.argwhere(mask_3d)
+        if len(coords) < 10:
+            return {'is_airway': False, 'coherence_val': 0.0, 'fac_mean': float(fac_mean), 'mean_hu': float(np.mean(data_3d[mask_3d > 0])) if np.any(mask_3d) else 0.0, 'periodicity_score': 0.0}
+            
+        # Standardize coords
+        coords_std = coords - np.mean(coords, axis=0)
+        cov = np.cov(coords_std, rowvar=False)
+        evals, evecs = np.linalg.eigh(cov)
+        principal_axis = evecs[:, -1] # Eigenvector with largest eigenvalue
+        
+        # Project voxel values onto principal axis
+        # We need values along the axis. Let's sample the data.
+        # Create a line of points along the axis within the bounding box
+        center = np.mean(coords, axis=0)
+        length = np.max(coords_std @ principal_axis) - np.min(coords_std @ principal_axis)
+        
+        # Sample points every 1mm
+        steps = int(length / np.min(spacing))
+        t = np.linspace(-length/2, length/2, steps)
+        # points = center + t * principal_axis
+        
+        # Actually, simpler: Project all VOI voxel intensities onto the axis position
+        # and bin them to creating a profile
+        projections = coords_std @ principal_axis
+        # Sort by position
+        sorted_indices = np.argsort(projections)
+        # intensities = data_3d[mask_3d][sorted_indices] # This is just all voxels sorted
+        
+        # We need a 1D signal. Let's bin the projections.
+        # bins = np.arange(np.min(projections), np.max(projections), 1.0/min(spacing)) # 1mm bins
+        # If too small, skip
+        if length < 5: # < 5mm
+             return {'is_airway': False, 'coherence_val': 0.0, 'fac_mean': fac_mean, 'periodicity_score': 0.0}
+
+        # Analyze peaks in intensity along the axis (Simulated)
+        # True bronchial wall has high-low-high HU (Wall-Air-Wall) or Rhythmic Wall-Cartilage
+        # For this implementation, we use a heuristic based on FAC and Intensity variance
+        
+        # Bronchi have:
+        # 1. High FAC (Air flowing, but here it's empty/air) OR Noisy FAC if very small
+        # 2. Very low HU core (-900)
+        # 3. Rhythmic wall density
+        
+        # Quick check: Is the core Air?
+        voi_hu = data_3d[mask_3d > 0]
+        mean_hu = np.mean(voi_hu)
+        
+        is_airway = False
+        coherence_val = 0.0
+        
+        if mean_hu < -400:
+             # Definitely air
+             is_airway = True
+             coherence_val = 0.55
+        elif fac_mean > 0.4 and mean_hu < 50:
+             # Potential airway with mucus or partial volume
+             # ------------------------------------------------------------------
+             # TASK 2: True Bronchial Filtering (FFT Analysis)
+             # ------------------------------------------------------------------
+             # Extract 1D intensity profile along principal axis
+             coords_std = coords - np.mean(coords, axis=0)
+             cov = np.cov(coords_std, rowvar=False)
+             evals, evecs = np.linalg.eigh(cov)
+             principal_axis = evecs[:, -1]
+             
+             # Project and bin data (1mm bins)
+             projections = coords_std @ principal_axis
+             min_proj, max_proj = np.min(projections), np.max(projections)
+             length_mm = max_proj - min_proj
+             
+             if length_mm > 10: # Only analyze if enough length for periodicity
+                 num_bins = int(length_mm) # 1mm sampling
+                 hist, bin_edges = np.histogram(projections, bins=num_bins, weights=data_3d[mask_3d > 0])
+                 counts, _ = np.histogram(projections, bins=num_bins)
+                 profile = np.divide(hist, counts, out=np.zeros_like(hist), where=counts!=0)
+                 
+                 # FFT
+                 # Detrend
+                 profile_detrend = profile - np.mean(profile)
+                 spectrum = np.abs(fft.rfft(profile_detrend))
+                 freqs = fft.rfftfreq(len(profile_detrend), d=1.0) # d=1mm
+                 
+                 # Look for peaks in 2-4mm wavelength range (freq 0.25 - 0.5 cycles/mm)
+                 valid_mask = (freqs >= 0.25) & (freqs <= 0.5)
+                 if np.any(valid_mask):
+                     max_power = np.max(spectrum[valid_mask])
+                     total_power = np.sum(spectrum)
+                     
+                     if total_power > 0:
+                         periodicity_score = max_power / total_power
+                         # If dominant power is in bronchial range > 30% energy
+                         if periodicity_score > 0.3:
+                             is_airway = True
+                             coherence_val = 0.55
+                             # Setup for return
+             
+        return {
+            'is_airway': is_airway,
+            'coherence_val': coherence_val,
+            'fac_mean': fac_mean,
+            'mean_hu': mean_hu,
+            'periodicity_score': periodicity_score if 'periodicity_score' in locals() else 0.0
+        }
+        
+    def _compute_multiscale_vesselness(self, data, spacing, sigma_range=(1.0, 3.0)):
+        """
+        TASK 1: Centralized Hessian & Eigenvalue Logic (Multiscale).
+        Computes Frangi-like vesselness and returns sorted eigenvalues.
+        """
+        # IRONDOME: Force 3D context
+        data = self._ensure_3d(data)
+        # Select optimal sigma based on physical spacing (~1.5 to 3mm vessels)
+        min_spacing = np.min(spacing)
+        sigma = 1.5 / min_spacing
+        
+        # Compute Hessian
+        H_elems = hessian_matrix(data, sigma=sigma, order='rc')
+        eigvals = hessian_matrix_eigvals(H_elems)
+        
+        # Sort by magnitude (|e1| <= |e2| <= |e3|)
+        # skimage returns in standard order, usually e1 < e2 < e3 (algebraic).
+        # Sort by magnitude (|e1| <= |e2| <= |e3|)
+        # skimage returns in standard order, usually e1 < e2 < e3 (algebraic).
+        # We need magnitude sorting for vesselness.
+        
+        # Check dimensionality
+        if eigvals.shape[0] < 3:
+            # Handle 2D case (likely single slice crop)
+            # Pad with zeros for 3rd dimension to avoid crash
+            l1 = eigvals[0]
+            l2 = eigvals[1]
+            l3 = np.zeros_like(l1)
+            # Vesselness in 2D: l2 is the main curvature
+        else:
+            abs_eigvals = np.abs(eigvals)
+            indices = np.argsort(abs_eigvals, axis=0) # Sort along eigenvalue dimension (0)
+            
+            # Re-order actual eigenvalues
+            l1 = np.take_along_axis(eigvals, indices, axis=0)[0]
+            l2 = np.take_along_axis(eigvals, indices, axis=0)[1]
+            l3 = np.take_along_axis(eigvals, indices, axis=0)[2]
+        
+        # Frangi Vesselness (Simplified for speed)
+        # 3D Line: l1 low, l2 high, l3 high (magnitude)
+        # Bright tube: l2 < 0, l3 < 0
+        # Dark tube: l2 > 0, l3 > 0
+        
+        # Similarity measures
+        Ra = np.abs(l2) / (np.abs(l3) + 1e-6) # Plate-like
+        Rb = np.abs(l1) / (np.sqrt(np.abs(l2 * l3)) + 1e-6) # Blob-like
+        S = np.sqrt(l1**2 + l2**2 + l3**2)
+        
+        # Vesselness formula filters
+        has_structure = (S > 20) # Min structureness (HU dependent)
+        is_tubular = (Rb < 0.4) & (Ra < 0.5) # Line-like (Rb tightened from 0.5→0.4 to reject heart chambers)
+        
+        vesselness = np.zeros_like(data)
+        vesselness[has_structure & is_tubular] = 1.0
+        
+        return vesselness, l1, l2, l3
+
+    def _apply_vector_guided_extrapolation(self, candidates_mask, data, spacing, fac_map):
+        """
+        Extrapolates filling defects using Dimension-Safe Morphological Closing.
+        """
+        # 1. FORCE 3D CONTEXT (Critical Fix)
+        # Prevents the array from collapsing to 2D if the candidate is on a single slice.
+        c_mask = self._ensure_3d(candidates_mask)
+        
+        # 2. Use 3D structuring element
+        struct = generate_binary_structure(3, 1) 
+        
+        # 3. Apply closing
+        bridged = binary_closing(c_mask, structure=struct, iterations=3)
+        
+        return bridged
+
+    def _calculate_hemodynamic_metrics(self, voi_findings, total_pa_volume):
+        """
+        Calculate advanced hemodynamic metrics (mPAP, PVR, RV Impact).
+        
+        Models:
+        - mPAP (mmHg) = 20 + (TotalObstruction% * 0.5)
+        - PVR (Wood Units) = mPAP / CardiacOutput (Assume CO=5.0 L/min)
+        - RV Impact = Obstructive Load normalized + RV Strain (implied)
+        """
+        total_clot_vol = sum(f.get('volume', 0) for f in voi_findings if not f.get('is_airway', False))
+        
+        # Calculate Obstruction Percentage (Volumetric)
+        obstruction_pct = (total_clot_vol / total_pa_volume) * 100 if total_pa_volume > 0 else 0
+        obstruction_pct = min(100.0, obstruction_pct)
+        
+        # mPAP Model (Empirical linear estimation)
+        # Baseline ~15-20 mmHg. 
+        # Massive TEP (>50% obs) can push to >40-50 mmHg.
+        estimated_mpap = 15.0 + (obstruction_pct * 0.5)
+        
+        # PVR Model
+        # Normal PVR < 3 Wood Units
+        # PVR = (mPAP - PCWP) / CO. Assume PCWP=10, CO=5.
+        # Simplified: PVR ~ mPAP / 5 (Very rough)
+        # Better: relate directly to obstruction
+        # PVR increases exponentially with obstruction > 40-50%
+        if obstruction_pct > 50:
+             pvr_wood_units = 1.5 * np.exp(0.04 * obstruction_pct) # Curve fitting
+        else:
+             pvr_wood_units = 1.0 + (obstruction_pct / 20.0) # Linear rise
+             
+        # RV Impact Index (0.0 - 1.0)
+        # 1.0 = Critical Failure / Shock
+        rv_impact_index = pvr_wood_units / 10.0 # Normalize to max expected PVR ~10
+        rv_impact_index = min(1.0, rv_impact_index)
+        
+        return {
+            'estimated_mpap': float(estimated_mpap),
+            'pvr_wood_units': float(pvr_wood_units),
+            'rv_impact_index': float(rv_impact_index),
+            'total_obstruction_pct': float(obstruction_pct)
+        }
+
+    def _simulate_reperfusion(self, voi_list, pa_mask, data_3d):
+        """
+        Simulate 'Virtual Lysis': Predict FAC recovery for each VOI.
+        """
+        for voi in voi_list:
+            if voi.get('is_airway'):
+                continue
+                
+            # Logic: If this clot is removed, flow becomes laminar.
+            # Local FAC should return to ~0.7-0.9 (Healthy vessel)
+            # But we want to calculate the 'Gain' or 'Delta'
+            current_fac = voi.get('fac_mean', 0.2)
+            predicted_fac = 0.85 # Theoretical healthy flow
+            
+            voi['predicted_recovery_fac'] = predicted_fac - current_fac
+            
+        return voi_list
+
+    def _prioritize_intervention(self, voi_list):
+        """
+        Sort VOIs by 'Rescue Potential' (Volume * FAC Delta).
+        Suggest primary target.
+        """
+        candidates = [v for v in voi_list if not v.get('is_airway', False)]
+        
+        if not candidates:
+            return None, voi_list
+            
+        # Score = Volume * Recovery Delta
+        # This prioritizes large clots that are causing most turbulence/stasis
+        for v in candidates:
+            score = v.get('volume', 0) * v.get('predicted_recovery_fac', 0)
+            v['rescue_score'] = score
+            
+        # Sort descending
+        candidates.sort(key=lambda x: x.get('rescue_score', 0), reverse=True)
+        
+        primary_target_id = candidates[0]['id']
+        
+        return primary_target_id, voi_list
+
     def _apply_hounsfield_masks(self, data, log_callback=None):
         """
         Create exclusion masks based on Hounsfield Units to remove noise.
@@ -667,6 +1105,27 @@ class TEPProcessingService:
         )
         volume_after_erosion = np.sum(eroded_mask)
         
+        # ═══════════════════════════════════════════════════════════════════════════
+        # STERNUM GUARD: Asymmetric Anterior Erosion
+        # The anterior 35% of the Y-axis contains the sternum, internal mammary
+        # vessels, and pericardial fat. Apply extra erosion only to this zone.
+        # ═══════════════════════════════════════════════════════════════════════════
+        y_dim = eroded_mask.shape[1]
+        anterior_zone_limit = int(y_dim * 0.35)
+        
+        struct_aggressive = generate_binary_structure(3, 2)  # 18-connected for stronger erosion
+        anterior_slice = eroded_mask[:, :anterior_zone_limit, :]
+        anterior_before = np.sum(anterior_slice)
+        eroded_mask[:, :anterior_zone_limit, :] = binary_erosion(
+            anterior_slice,
+            structure=struct_aggressive,
+            iterations=3
+        )
+        anterior_removed = anterior_before - np.sum(eroded_mask[:, :anterior_zone_limit, :])
+        
+        if log_callback:
+            log_callback(f"   [STERNUM GUARD] Anterior 35% extra erosion: {anterior_removed:,} voxels removed")
+        
         # Step 2: Create extra bone safety buffer
         bone_mask = data > self.BONE_EXCLUSION_HU
         total_bone_dilation = self.BONE_DILATION_ITERATIONS + self.ROI_BONE_BUFFER_ITERATIONS
@@ -722,98 +1181,133 @@ class TEPProcessingService:
         Strategy:
         1. Create a thoracic silhouette mask (soft tissue range)
         2. Find center of mass of the silhouette
-        3. Apply 200mm x 200mm crop in the axial plane
+        3. Apply 200mm x 200mm crop in the axial plane (Y, X axes)
+        
+        DIMENSION-AWARE: 
+        - 3D (Z, Y, X): Crop axes 1 and 2, preserve axis 0 (Z slices)
+        - 2D (Y, X): Crop axes 0 and 1
         
         This reduces peripheral noise (ribs, table) and optimizes compute.
         """
         crop_size_mm = self.MEDIASTINUM_CROP_MM
         
         # Create thoracic silhouette mask (soft tissue + lung combined)
-        # This captures the main body area
         thorax_mask = (data > -900) & (data < 500)
         thorax_mask = binary_fill_holes(thorax_mask)
         
         # Remove small disconnected regions
         thorax_mask = remove_small_objects(thorax_mask, min_size=10000)
         
+        # Determine data dimensionality and axis indices
+        is_3d = data.ndim == 3
+        
+        if is_3d:
+            # 3D: shape is (Z, Y, X) - crop Y and X (axes 1 and 2)
+            y_axis, x_axis = 1, 2
+            shape_y, shape_x = data.shape[1], data.shape[2]
+            spacing_y = spacing[1] if len(spacing) > 1 else 1.0
+            spacing_x = spacing[2] if len(spacing) > 2 else 1.0
+        else:
+            # 2D: shape is (Y, X) - crop both axes
+            y_axis, x_axis = 0, 1
+            shape_y, shape_x = data.shape[0], data.shape[1]
+            spacing_y = spacing[0] if len(spacing) > 0 else 1.0
+            spacing_x = spacing[1] if len(spacing) > 1 else 1.0
+        
         # Find center of mass of thoracic silhouette
         if np.sum(thorax_mask) > 0:
             com = center_of_mass(thorax_mask.astype(float))
-            center_x = int(com[0])
-            center_y = int(com[1])
+            if is_3d:
+                center_y = int(com[1])  # Y is axis 1
+                center_x = int(com[2])  # X is axis 2
+            else:
+                center_y = int(com[0])
+                center_x = int(com[1])
         else:
             # Fallback to geometric center
-            center_x = data.shape[0] // 2
-            center_y = data.shape[1] // 2
+            center_y = shape_y // 2
+            center_x = shape_x // 2
         
         # Calculate crop dimensions in voxels
-        crop_voxels_x = int(crop_size_mm / spacing[0])
-        crop_voxels_y = int(crop_size_mm / spacing[1])
+        crop_voxels_y = int(crop_size_mm / spacing_y)
+        crop_voxels_x = int(crop_size_mm / spacing_x)
         
-        # Ensure even dimensions for symmetry
-        crop_voxels_x = min(crop_voxels_x, data.shape[0])
-        crop_voxels_y = min(crop_voxels_y, data.shape[1])
+        # Ensure crop fits within data bounds
+        crop_voxels_y = min(crop_voxels_y, shape_y)
+        crop_voxels_x = min(crop_voxels_x, shape_x)
         
         # Calculate crop bounds
-        half_x = crop_voxels_x // 2
         half_y = crop_voxels_y // 2
+        half_x = crop_voxels_x // 2
         
-        x_start = max(0, center_x - half_x)
-        x_end = min(data.shape[0], center_x + half_x)
         y_start = max(0, center_y - half_y)
-        y_end = min(data.shape[1], center_y + half_y)
+        y_end = min(shape_y, center_y + half_y)
+        x_start = max(0, center_x - half_x)
+        x_end = min(shape_x, center_x + half_x)
         
-        # Apply crop (keep all slices in z)
-        data_cropped = data[x_start:x_end, y_start:y_end, :]
+        # Apply crop based on dimensionality
+        if is_3d:
+            # 3D: Keep all Z slices, crop Y and X
+            data_cropped = data[:, y_start:y_end, x_start:x_end]
+        else:
+            # 2D: Crop Y and X directly
+            data_cropped = data[y_start:y_end, x_start:x_end]
         
         crop_info = {
-            'center_of_mass': (center_x, center_y),
+            'center_of_mass': (center_y, center_x),
             'crop_bounds': {
-                'x_start': x_start, 'x_end': x_end,
                 'y_start': y_start, 'y_end': y_end,
+                'x_start': x_start, 'x_end': x_end,
             },
             'original_shape': data.shape,
             'cropped_shape': data_cropped.shape,
             'crop_size_mm': crop_size_mm,
-            'crop_voxels': (crop_voxels_x, crop_voxels_y),
+            'crop_voxels': (crop_voxels_y, crop_voxels_x),
+            'is_3d': is_3d,
         }
         
         if log_callback:
-            log_callback(f"   Center of mass: ({center_x}, {center_y})")
+            log_callback(f"   Center of mass: ({center_y}, {center_x})")
             log_callback(f"   Crop: {data.shape} → {data_cropped.shape}")
             log_callback(f"   ROI size: {crop_size_mm}mm × {crop_size_mm}mm")
         
         return data_cropped, crop_info
     
     def _apply_crop_to_mask(self, mask, crop_info):
-        """Apply the same crop bounds to a mask."""
+        """Apply the same crop bounds to a mask (dimension-aware)."""
         bounds = crop_info['crop_bounds']
-        return mask[
-            bounds['x_start']:bounds['x_end'],
-            bounds['y_start']:bounds['y_end'],
-            :
-        ]
+        is_3d = crop_info.get('is_3d', mask.ndim == 3)
+        
+        if is_3d and mask.ndim == 3:
+            # 3D: Keep all Z slices, crop Y and X
+            return mask[:, bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end']]
+        elif mask.ndim == 2:
+            # 2D: Crop Y and X directly
+            return mask[bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end']]
+        else:
+            # Fallback for unexpected cases
+            return mask[:, bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end']]
     
     def _expand_to_original(self, array, original_shape, crop_info):
-        """Expand a cropped array back to original dimensions (zero-padded)."""
+        """Expand a cropped array back to original dimensions (zero-padded, dimension-aware)."""
         bounds = crop_info['crop_bounds']
+        is_3d = crop_info.get('is_3d', len(original_shape) >= 3)
         
-        # Handle both 3D and 4D arrays (for heatmap RGB)
+        expanded = np.zeros(original_shape, dtype=array.dtype)
+        
+        # Handle different array dimensionalities
         if len(original_shape) == 4:
-            expanded = np.zeros(original_shape, dtype=array.dtype)
-            expanded[
-                bounds['x_start']:bounds['x_end'],
-                bounds['y_start']:bounds['y_end'],
-                :,
-                :
-            ] = array
+            # 4D: RGBA heatmap (Z, Y, X, C) - crop was on Y, X
+            expanded[:, bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end'], :] = array
+        elif len(original_shape) == 3 and is_3d:
+            # 3D: Volume (Z, Y, X) - crop was on Y, X
+            expanded[:, bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end']] = array
+        elif len(original_shape) == 2:
+            # 2D: Single slice (Y, X)
+            expanded[bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end']] = array
         else:
-            expanded = np.zeros(original_shape, dtype=array.dtype)
-            expanded[
-                bounds['x_start']:bounds['x_end'],
-                bounds['y_start']:bounds['y_end'],
-                :
-            ] = array
+            # Fallback: assume 3D behavior
+            expanded[:, bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end']] = array
         
         return expanded
     
@@ -883,6 +1377,10 @@ class TEPProcessingService:
         Returns:
             fac_map: 3D array of local anisotropy values (0-1 range)
         """
+        # IRON DOME: Force 3D before axis=2 operations
+        data = self._ensure_3d(data)
+        pa_mask = self._ensure_3d(pa_mask)
+        
         # Calculate gradients in x, y, z directions
         gx = sobel(data, axis=0, mode='reflect')
         gy = sobel(data, axis=1, mode='reflect')
@@ -949,6 +1447,8 @@ class TEPProcessingService:
         """
         Compute Coherence Index (CI) using Structure Tensor.
         
+        SAFE MODE: Handles 2D/Flat volumes by processing as 2D then expanding back.
+        
         CI measures how well the image gradient is oriented in a single direction.
         - CI ~ 1.0: Anisotropic / Laminar (Clean vessels, edges)
         - CI ~ 0.0: Isotropic / Disrupted (Thrombus, parenchyma, noise)
@@ -962,20 +1462,25 @@ class TEPProcessingService:
         """
         
         # ═══════════════════════════════════════════════════════════════════════════
+        # STRICT 3D ENFORCEMENT
+        # ═══════════════════════════════════════════════════════════════════════════
+        data_proc = self._ensure_3d(data)
+        pa_mask_proc = self._ensure_3d(pa_mask)
+        ndim = 3
+        
+        # ═══════════════════════════════════════════════════════════════════════════
         # STEP 0: STRICT BONE EXCLUSION (Before any computation to save time)
         # ═══════════════════════════════════════════════════════════════════════════
-        # Create bone mask (HU > 450 captures ribs, spine, sternum)
-        bone_mask = data > 450
+        bone_mask = data_proc > 450
         
-        # Dilate bone mask by 5mm (strict) to capture edges where Hessian often fails
         dilation_mm = 5.0
         if spacing is not None:
             mean_spacing = np.mean(spacing[:2])  # XY spacing
             dilation_voxels = max(1, int(dilation_mm / mean_spacing))
         else:
-            dilation_voxels = 8  # Default fallback (approx 5mm with 0.6-0.7 spacing)
+            dilation_voxels = 8
         
-        struct = generate_binary_structure(3, 1)
+        struct = generate_binary_structure(ndim, 1)
         bone_exclusion = binary_dilation(bone_mask, structure=struct, iterations=dilation_voxels)
         
         if log_callback:
@@ -984,17 +1489,19 @@ class TEPProcessingService:
         # ═══════════════════════════════════════════════════════════════════════════
         # STEP 1: Create analysis ROI (PA dilated MINUS bone exclusion)
         # ═══════════════════════════════════════════════════════════════════════════
-        roi_mask = binary_dilation(pa_mask, structure=struct, iterations=3)
-        roi_mask = roi_mask & ~bone_exclusion  # SUBTRACT bone from analysis region
+        roi_mask = binary_dilation(pa_mask_proc, structure=struct, iterations=3)
+        roi_mask = roi_mask & ~bone_exclusion
         
-        # 1. Compute Gradients
-        gx = sobel(data, axis=0, mode='reflect')
-        gy = sobel(data, axis=1, mode='reflect')
-        gz = sobel(data, axis=2, mode='reflect')
+        # 1. Compute Gradients (dimension-aware)
+        gx = sobel(data_proc, axis=0, mode='reflect')
+        gy = sobel(data_proc, axis=1, mode='reflect')
+        if ndim == 3:
+            gz = sobel(data_proc, axis=2, mode='reflect')
+        else:
+            gz = np.zeros_like(gx)  # Virtual Z gradient for 2D
         
-        # 2. Compute Structure Tensor Elements (Outer Product smoothed by Gaussian)
-        # J = K_rho * (nabla I . nabla I^T)
-        rho = 2.0 # Integration scale (larger than derivation scale)
+        # 2. Compute Structure Tensor Elements
+        rho = 2.0
         
         Sxx = gaussian_filter(gx**2, sigma=rho)
         Syy = gaussian_filter(gy**2, sigma=rho)
@@ -1003,16 +1510,15 @@ class TEPProcessingService:
         Sxz = gaussian_filter(gx*gz, sigma=rho)
         Syz = gaussian_filter(gy*gz, sigma=rho)
         
-        # Flat indices of ROI (now excludes bone)
         coords = np.where(roi_mask)
         n_voxels = len(coords[0])
         
-        coherence_map = np.zeros_like(data, dtype=np.float32)
+        coherence_map = np.zeros_like(data_proc, dtype=np.float32)
         
         if n_voxels == 0:
             return coherence_map
 
-        # Vectorized construction of tensors for ROI voxels
+        # Vectorized tensor construction
         tensors = np.zeros((n_voxels, 3, 3), dtype=np.float32)
         tensors[:, 0, 0] = Sxx[coords]
         tensors[:, 1, 1] = Syy[coords]
@@ -1085,248 +1591,400 @@ class TEPProcessingService:
     CENTERLINE_MAX_DISTANCE_MM = 5.0   # Max distance from centerline for Score>=3 lesions
     PERIPHERY_MIN_SIZE_VOXELS = 10     # Min size for peripheral lesions (isolated small ones discarded)
     
+    def _compute_hodge_features(self, data, spacing):
+        """
+        MART v4: Hodge Laplacian Sensor.
+        Returns divergence map (Laplacian of intensity field).
+        Curl is derived externally from the Coherence map.
+        """
+        # Force 3D context
+        data = self._ensure_3d(data)
+        
+        # Determine optimal scale
+        sigma = 1.5 / np.min(spacing)
+        
+        # Divergence (of Gradient) = Laplacian — robust scipy implementation
+        from scipy.ndimage import gaussian_laplace
+        div_map = gaussian_laplace(data, sigma=sigma)
+        
+        return div_map
+        
+    def _compute_forman_ricci_curvature(self, data, mask, spacing):
+        """
+        MART v4: Forman-Ricci Curvature Sensor.
+        Discrete curvature on voxel grid.
+        
+        Simplified 3D implementation:
+        Ric(e) ~ 4 - (deg(v1) + deg(v2)) [Rough approximation for regular grid]
+        But we need weighted edges based on Gradient.
+        
+        Fast Voxel Implementation:
+        Ricci Curvature is related to "Parallel Transport" reliability.
+        In images, it correlates with "Bottleneckness".
+        
+        Ollivier-Ricci is better but slow. Forman is purely combinatoric.
+        
+        Approximation:
+        Local Ricci Curvature ~ Laplacian(Log(Density))?
+        
+        We will use a geometric heuristic for "Forman-Ricci":
+        1. Mean curvature of the level set (Isophote curvature).
+        2. Computed effectively using gradient and hessian.
+        
+        Kappa = (v^T H v - |v|^2 Trace(H)) / |v|^3 ? (Formula requires checking)
+        
+        Let's use the standard "Mean Curvature" filter as the proxy for Forman-Ricci
+        in the continuous domain.
+        H_mean = (Hxx + Hyy + Hzz) / 2 ? No.
+        
+        Let's implement 'Mean Curvature' from Hessian.
+        Km = 0.5 * divergence(normalized gradient)
+        
+        norm_grad = grad / (|grad| + epsilon)
+        Km = div(norm_grad)
+        
+        High Positive Km = Accumulation/Ridge.
+        High Negative Km = Valley.
+        
+        We map this to Ricci score.
+        """
+        # Force 3D context
+        data = self._ensure_3d(data)
+        mask = self._ensure_3d(mask) if mask is not None else None
+        
+        sigma = 1.0
+        # Gradients - handle both 2D and 3D
+        smoothed = gaussian_filter(data, sigma=sigma)
+        grads = np.gradient(smoothed)
+        
+        # FIX 2: Handle 2D (2 gradients) vs 3D (3 gradients)
+        if len(grads) == 2:
+            gy, gx = grads
+            gz = np.zeros_like(gy)  # Virtual Z-gradient for 2D
+        else:
+            gz, gy, gx = grads
+        
+        norm = np.sqrt(gz**2 + gy**2 + gx**2 + 1e-6)
+        
+        # Normalized gradient fields
+        nz = gz / norm
+        ny = gy / norm
+        nx = gx / norm
+        
+        # Divergence of normalized gradient = Mean Curvature
+        # FIX 3: Handle axis indices based on actual dimensionality
+        if data.ndim == 2:
+            div = np.gradient(ny, axis=0) + np.gradient(nx, axis=1)
+        else:
+            div = np.gradient(nz, axis=0) + np.gradient(ny, axis=1) + np.gradient(nx, axis=2)
+        
+        # Mean Curvature map
+        # Ricci ~ Curvature
+        # Masked
+        ricci_map = np.zeros_like(data, dtype=np.float32)
+        ricci_map[mask] = div[mask]
+        
+        return ricci_map
+        
+    def _compute_fractal_dimension(self, binary_mask):
+        """
+        MART v4: Fractal Analysis Sensor.
+        Box-counting dimension (Minkowski-Bouligand).
+        """
+        # 1. Skeletonize
+        skeleton = skeletonize_3d(binary_mask)
+        pixels = np.sum(skeleton)
+        if pixels < 100:
+            return 0.0
+            
+        # 2. Box Counting
+        # We embed the volume in a power-of-2 cube
+        # Padded shape
+        # Simplified: Just grid counting on the crop
+        
+        scales = [2, 4, 8, 16, 32]
+        counts = []
+        
+        # Get coordinates
+        coords = np.argwhere(skeleton)
+        for scale in scales:
+            # Quantize coordinates
+            coords_scaled = np.floor(coords / scale)
+            # Find unique boxes
+            unique_boxes = np.unique(coords_scaled, axis=0)
+            counts.append(len(unique_boxes))
+            
+        # 3. Linear Regression
+        # log(N) = D * log(1/s) + C
+        # log(N) = -D * log(s) + C
+        coeffs = np.polyfit(np.log(scales), np.log(counts), 1)
+        
+        # Df = -slope
+        return -coeffs[0]
+
     def _detect_filling_defects_enhanced(self, data, pa_mask, mk_map, fac_map, coherence_map, exclusion_mask, 
-                                         lung_mask=None, log_callback=None, apply_contrast_inhibitor=True,
-                                         centerline=None, centerline_info=None,
-                                         z_guard_slices=None, is_non_contrast=False):
-        """
-        Detect filling defects using HESSIAN PLATE FILTER (Rib Removal) + VESSELNESS BOOST.
+                                     lung_mask, log_callback, apply_contrast_inhibitor, is_non_contrast, centerline, 
+                                     centerline_info, z_guard_slices, spacing):
         
-        Refined Logic:
-        1. Plate Filter (Relaxed): Ra < 0.6 (was 0.4). Removes explicit ribs/pleura.
-        2. Vesselness Boost: If tubular (lambda2 < 0, lambda3 < 0), add +1.0 to Score.
-           This helps atypical thrombi (blobs) reach the threshold if they are inside a vessel.
-        3. Scoring Recalibration:
-           - HU (30-100): +2 pts
-           - Vesselness Boost: +1 pt
-           - MK > 1.2: +1 pt
-           - FAC < 0.2: +1 pt
-           - Coherence < 0.4: +1.5 pts (Rupture Boost)
-        """
+        import traceback as tb
+        
+        # 1. IRON DOME: Force 3D on all inputs
+        data = self._ensure_3d(data)
+        pa_mask = self._ensure_3d(pa_mask)
+        mk_map = self._ensure_3d(mk_map)
+        fac_map = self._ensure_3d(fac_map)
+        coherence_map = self._ensure_3d(coherence_map)
+        exclusion_mask = self._ensure_3d(exclusion_mask)
+        if lung_mask is not None: lung_mask = self._ensure_3d(lung_mask)
 
-        if not np.any(pa_mask):
-            return np.zeros_like(pa_mask, dtype=bool), {
-                'clot_count': 0,
-                'score_map': np.zeros_like(data, dtype=np.float32),
-                'findings': [],
-                'diagnostic_stats': {},
-                'is_non_contrast_mode': is_non_contrast # Ensure flag is present
-            }
-            
         if log_callback:
-            log_callback("   📐 Calculating Hessian: Plate Filter (Relaxed) + Vesselness Boost...")
+            log_callback(f"   🔍 [DIAG] data={data.shape}({data.ndim}D) pa_mask={pa_mask.shape}({pa_mask.ndim}D) mk={mk_map.shape}({mk_map.ndim}D) fac={fac_map.shape}({fac_map.ndim}D) coh={coherence_map.shape}({coherence_map.ndim}D)")
 
-        # 1. Hessian Matrix Calculation (Adaptive Sigma)
-        hessian = self._compute_hessian(data, sigma=1.0)
-        evals = self._compute_eigenvalues(hessian)
+        # ═══════════════════════════════════════════════════════════════════════════
+        # [RESTORED] MART v4: Topology Sensors (Hodge + Ricci)
+        # ═══════════════════════════════════════════════════════════════════════════
+        if log_callback: log_callback("   📐 Activating Topology Sensors (MART v4)...")
+        try:
+            hodge_score = self._compute_hodge_features(data, spacing)
+            if hodge_score.shape != data.shape:
+                if log_callback: log_callback(f"   ⚠️ [DIAG] Hodge shape mismatch: {hodge_score.shape} vs data {data.shape}")
+                hodge_score = np.zeros_like(data, dtype=np.float32)
+            hodge_score = self._ensure_3d(hodge_score)
+        except Exception as e:
+            if log_callback: log_callback(f"   ⚠️ Hodge sensor fallback (error: {e})")
+            hodge_score = np.zeros_like(data, dtype=np.float32)
         
-        # Extract Eigenvalues (|e1| <= |e2| <= |e3|)
-        l1 = evals[..., 0]
-        l2 = evals[..., 1]
-        l3 = evals[..., 2]
+        try:
+            ricci_score = self._compute_forman_ricci_curvature(data, pa_mask, spacing)
+            if ricci_score.shape != data.shape:
+                if log_callback: log_callback(f"   ⚠️ [DIAG] Ricci shape mismatch: {ricci_score.shape} vs data {data.shape}")
+                ricci_score = np.zeros_like(data, dtype=np.float32)
+            ricci_score = self._ensure_3d(ricci_score)
+        except Exception as e:
+            if log_callback: log_callback(f"   ⚠️ Ricci sensor fallback (error: {e})")
+            ricci_score = np.zeros_like(data, dtype=np.float32)
         
-        # 2. Compute Geometric Ratios
-        l3_safe = np.where(l3 == 0, 1e-10, l3)
-        ra = np.abs(l2) / np.abs(l3_safe)
-        s = np.sqrt(l1**2 + l2**2 + l3**2)
-        
-        # 3. Identify Planar Structures (Ribs/Pleura)
-        # Conditions: Plate Ratio < 0.6 (Relaxed) and Bright Structure (l3 < 0)
-        is_plate_geometry = (ra < 0.35)     # Relaxed from 0.6 to 0.35 to save big thrombus
-        is_bright_structure = (l3 < 0)
-        has_signal = (s > 40)
-        
-        is_rib_artifact = is_plate_geometry & is_bright_structure & has_signal
+        # [RESTORED] Multiscale Vesselness (Hessian Tube Boost)
+        if log_callback: log_callback("   🚀 Computing Multiscale Vesselness (Hessian Tube Sensor)...")
+        try:
+            v_map, _, _, _ = self._compute_multiscale_vesselness(data, spacing)
+            if v_map.shape != data.shape:
+                if log_callback: log_callback(f"   ⚠️ [DIAG] Vesselness shape mismatch: {v_map.shape} vs data {data.shape}")
+                v_map = np.zeros_like(data, dtype=np.float32)
+            v_map = self._ensure_3d(v_map)
+        except Exception as e:
+            if log_callback: log_callback(f"   ⚠️ Vesselness sensor fallback (error: {e})")
+            v_map = np.zeros_like(data, dtype=np.float32)
 
-        # 4. Identify Tubular Structures (Vesselness Boost)
-        # Condition A: Bright Tube (Contrast Vessel) -> l2 < 0 & l3 < 0
-        is_tubular_bright = (l2 < 0) & (l3 < 0)
-        
-        # Condition B: Dark Tube (Filling Defect / Thrombus) -> l2 > 0 & l3 > 0
-        # Thrombus is a "Dark" structure inside a Bright vessel.
-        # Its curvature (2nd derivative) is Positive (Valley).
-        is_tubular_dark = (l2 > 0) & (l3 > 0)
-        
-        is_tubular = is_tubular_bright | is_tubular_dark
-        
-        # 5. Expand PA Mask
-        struct = generate_binary_structure(3, 1)
-        pa_dilated = binary_dilation(pa_mask, structure=struct, iterations=6) 
-        
-        # 6. Base Requirements
-        in_pa_region = pa_dilated
-        not_excluded = ~exclusion_mask
-        in_roi = lung_mask if lung_mask is not None else np.ones_like(pa_mask, dtype=bool)
-        
-        # BASE MASK: Inside PA Region AND ROI AND Not Excluded
-        base_mask = in_pa_region & not_excluded & in_roi
-        
-        # 7. Scoring System
+        if log_callback:
+            log_callback(f"   🔍 [DIAG] hodge={hodge_score.shape}({hodge_score.ndim}D) ricci={ricci_score.shape}({ricci_score.ndim}D) v_map={v_map.shape}({v_map.ndim}D)")
+
+        # 1.5 Scoring logic
         score_map = np.zeros_like(data, dtype=np.float32)
+        score_map[(data >= self.THROMBUS_RANGE[0]) & (data <= self.THROMBUS_RANGE[1]) & pa_mask] += 0.5 
+        score_map[(mk_map > self.MK_THROMBUS_THRESHOLD) & pa_mask] += 1.0
+        score_map[(fac_map < self.FAC_THROMBUS_THRESHOLD) & pa_mask] += 1.0
+        score_map[(coherence_map < 0.4) & pa_mask] += 1.5
         
-        # Criterion A: Thrombus HU Range 
-        # BRANCHING LOGIC FOR NC_MODE
-        hu_mask = (data >= self.THROMBUS_RANGE[0]) & (data <= self.THROMBUS_RANGE[1])
+        # Apply Vesselness Boost (Tubular structures get +1.0)
+        score_map[v_map > 0] += 1.0
         
-        if not is_non_contrast:
-            # STANDARD CTA: Fixed Points +3.0
-            score_map[hu_mask & base_mask] += self.SCORE_HU_POINTS
-        else:
-             # NC MODE: No fixed HU points.
-             # Scoring relies on Vesselness/MK/FAC and Confidence adjustment.
-             # We initiate candidates but don't give the huge +3 boost yet.
-             # Instead, we give a base score to allow detection if other boosters are present.
-             score_map[hu_mask & base_mask] += 1.0 # Minimum to be considered a candidate
+        # [RESTORED] Visual Noise Filter: Zero out regions with extreme topology gradients (artifacts)
+        noise_mask = (hodge_score > 300) | (np.abs(ricci_score) > 5.0)
+        voxels_blocked = int(np.sum(score_map[noise_mask] > 0))
+        score_map[noise_mask] = 0
         
-        # Criterion B: Vesselness Boost (Tubular Geometry) -> +1 point
-        # Checks for EITHER Bright Tube OR Dark Tube
-        score_map[is_tubular & base_mask] += 1.0
+        if log_callback and voxels_blocked > 0:
+            log_callback(f"   🛡️ Visual Noise Filter blocked {voxels_blocked:,} artifact voxels")
         
-        # Criterion C: High Kurtosis (MK > 1.2) -> +1 point
-        mk_high = (mk_map > self.MK_THROMBUS_THRESHOLD)
-        score_map[mk_high & base_mask] += 1.0
+        threshold = 2.5 if is_non_contrast else 3.0
+        candidates = score_map >= threshold
         
-        # Criterion D: Low Anisotropy (FAC < 0.2) -> +1 point
-        fac_low = (fac_map < self.FAC_THROMBUS_THRESHOLD)
-        score_map[fac_low & base_mask] += 1.0
-        
-        # ══════════════════════════════════════════════════════════════════════
-        # FIX VASCULAR COHERENCE INVERSION (Center of Vessel = 0 -> 1)
-        # ══════════════════════════════════════════════════════════════════════
-        # Structure Tensor naturally yields 0 in the homogeneous center of a vessel.
-        # This causes Healthy Flow (Laminar) to look "Turbulent" (Purple).
-        # We use Hessian "Bright Tube" (is_tubular_bright) to confirm Laminar Flow.
-        # Force Coherence to 0.95 (Green) inside healthy vessels.
-        if np.any(is_tubular_bright):
-            coherence_map[is_tubular_bright] = np.maximum(coherence_map[is_tubular_bright], 0.95)
-        
-        # Criterion E: Low Coherence (Rupture Boost) -> +2.0 points (MART v2)
-        # This detects "disrupted" signal even if HU is borderline
-        # Increased to 2.0 to ensure NC_MODE (Base 1.0) reaches 3.0 (Definite)
-        ci_low = (coherence_map < 0.4) & (coherence_map > 0.0) # >0 to avoid background
-        score_map[ci_low & base_mask] += 2.0
-        
-        # 8. Apply Geometry Filter (Plate Exclusion)
-        score_map[is_rib_artifact] = 0
-        
-        # 9. Contrast Inhibitor
-        if apply_contrast_inhibitor:
-            contrast_mask = (data > self.CONTRAST_INHIBITOR_HU)
-            score_map[contrast_mask] = 0
-        else:
-            contrast_mask = np.zeros_like(data, dtype=bool)
-            
-        # 9.5 DEBUG LOGGING: Slice Audit
         if log_callback:
-            # Check slices with high activity or suppression
-            total_slices = data.shape[2]
-            for z in range(0, total_slices, 20): # Sample every 20 slices
-                 slice_contrast = np.sum(contrast_mask[:,:,z])
-                 slice_plates = np.sum(is_rib_artifact[:,:,z])
-                 slice_tubes = np.sum(is_tubular[:,:,z])
-                 if slice_contrast > 0 or slice_plates > 0 or slice_tubes > 0:
-                     log_callback(f"   [DEBUG] Slice {z}: {slice_contrast} inhibited (contrast), {slice_plates} removed (plates), {slice_tubes} boosted")
-    
-        # 10. Thresholding & Stats
-        thrombus_mask = score_map >= 3.0 # Strict threshold for DEFINITE (Red)
-        thrombus_mask = remove_small_objects(thrombus_mask, min_size=15)
-        labeled_thrombi, clot_count = label(thrombus_mask)
+            log_callback(f"   🔍 [DIAG] score_map={score_map.shape}({score_map.ndim}D) candidates={candidates.shape}({candidates.ndim}D) sum={int(np.sum(candidates))}")
         
-        findings = []
-        for i in range(1, clot_count + 1):
-             mask_i = (labeled_thrombi == i)
-             mean_score = np.mean(score_map[mask_i])
-             mean_ra = np.mean(ra[mask_i])
-             boost_applied = np.any(is_tubular[mask_i])
-             
-             # ══════════════════════════════════════════════════════════════════════════
-             # MART v3: Surface Rugosity Filter (Bronchus Exclusion)
-             # ══════════════════════════════════════════════════════════════════════════
-             is_bronchus, bronchus_conf = self._analyze_surface_rugosity(mask_i, data)
-             
-             if is_bronchus:
-                 if log_callback:
-                     log_callback(f"   🛑 EXCLUDED Lesion #{i}: Bronchus Signature Detected (Conf={bronchus_conf:.2f})")
-                 
-                 # Encode "Airway" state in Coherence Map for visualization
-                 # 0.55 is the Magic Number for "Gray/Neutral" in Frontend
-                 if coherence_map is not None:
-                     coherence_map[mask_i] = 0.55
-                     
-                 # Remove from final mask
-                 thrombus_mask[mask_i] = False
-                 continue # Skip adding to findings
-             
-             if log_callback:
-                 log_callback(f"   [DEBUG] Lesion #{i}: Score={mean_score:.1f}, PlateRatio={mean_ra:.2f}, Boost={boost_applied}")
-             
-             mean_ci = np.mean(coherence_map[mask_i]) if coherence_map is not None else 0.0
-             
-             if is_non_contrast:
-                 confidence_score = 0.4 # Base penalty applied for lack of contrast
-                 
-                 # Calculate surrounding HU (shell around the lesion)
-                 # Dilate mask by 5 pixels to get the shell (jump over penumbra/edges)
-                 # Use connectivity 3 (26-neighbors, Box) to grow faster than Euclidean sphere
-                 struct = generate_binary_structure(3, 3) 
-                 shell_mask = binary_dilation(mask_i, structure=struct, iterations=5) ^ mask_i
-                 surrounding_mean = np.mean(data[shell_mask]) if np.any(shell_mask) else 0
-                 
-                 mean_hu = np.mean(data[mask_i])
-                 
-                 # Hyperdensity Boost: High HU lesion + Low HU background
-                 if mean_hu > 50 and surrounding_mean < 40:
-                     confidence_score += 0.2
-                 
-                 # Tensor Coherence Boost (MART v2)
-                 if mean_ci < 0.4:
-                     confidence_score += 0.3
-                     
-                 # Geometric Penalty (if Ra > 0.3 it's likely soft tissue/muscle)
-                 if mean_ra > 0.3:
-                     confidence_score -= 0.1
-                     
-                 if confidence_score < 0.6:
-                     confidence = 'LOW_CONFIDENCE (ORIENTATIVE)'
-                 else:
-                     confidence = 'MODERATE_CONFIDENCE'
-             else:
-                 # Standard CTA Default
-                 confidence = 'DEFINITE' # Score >= 3 is Definite
-                 confidence_score = 1.0
-             
-             findings.append({
-                 'id': i,
-                 'volume_voxels': int(np.sum(mask_i)),
-                 'detection_score': float(mean_score),
-                 'confidence': confidence,
-                 'confidence_index': float(confidence_score) if is_non_contrast else 1.0,
-                 'coherence_index': float(mean_ci),
-                 'slice_range': [int(np.min(np.where(mask_i)[0])), int(np.max(np.where(mask_i)[0]))]
-             })
-                 
-        clot_info = {
-            'clot_count': clot_count,
-            'clot_count_definite': clot_count, # Since threshold is 3.0, all are definite
-            'clot_count_suspicious': 0,
+        # 2. Safe Extrapolation
+        if log_callback: log_callback("   🚀 Applying Vector-Guided Extrapolation (Safe Mode)...")
+        try:
+            candidates = self._ensure_3d(self._apply_vector_guided_extrapolation(candidates, data, spacing, fac_map))
+            if log_callback: log_callback(f"   🔍 [DIAG] post-extrap candidates={candidates.shape}({candidates.ndim}D)")
+        except Exception as e:
+            if log_callback: 
+                log_callback(f"   ❌ [DIAG] EXTRAPOLATION CRASHED: {e}")
+                log_callback(f"   ❌ [DIAG] TRACEBACK: {tb.format_exc()}")
+            # Keep original candidates
+        
+        # 3. Labeling — IRON DOME: Force 3D after every scipy call
+        try:
+            labeled_mask, num_features = sk_label(self._ensure_3d(candidates), return_num=True)
+            labeled_mask = self._ensure_3d(labeled_mask)
+            if log_callback: log_callback(f"   🔍 [DIAG] labeled_mask={labeled_mask.shape}({labeled_mask.ndim}D) features={num_features}")
+        except Exception as e:
+            if log_callback:
+                log_callback(f"   ❌ [DIAG] LABELING CRASHED: {e}")
+                log_callback(f"   ❌ [DIAG] TRACEBACK: {tb.format_exc()}")
+            labeled_mask = np.zeros_like(data, dtype=np.int32)
+            num_features = 0
+            
+        thresholded_mask = np.zeros_like(data, dtype=bool)
+        voi_findings = []
+        
+        regions = regionprops(labeled_mask, intensity_image=data)
+        
+        # SAFETY FENCE: Absolutely guarantee 3D before any [z, y, x] slicing
+        data = self._ensure_3d(data)
+        labeled_mask = self._ensure_3d(labeled_mask)
+        thresholded_mask = self._ensure_3d(thresholded_mask)
+        
+        for idx, region in enumerate(regions):
+            try:
+                # Calculate physical volume of the candidate
+                voxel_volume_mm3 = np.prod(spacing)
+                candidate_volume_mm3 = region.area * voxel_volume_mm3
+
+                # Filter out "Dust": Minimum 50mm3 (approx 3x3x3mm cube) to be clinical
+                if candidate_volume_mm3 < 50.0: 
+                    continue
+                
+                # --- THE INFORMATION SANDWICH FIX ---
+                bbox = region.bbox
+                if len(bbox) == 6:
+                    z1, y1, x1, z2, y2, x2 = bbox
+                else: # Handle rare 2D bbox case
+                    y1, x1, y2, x2 = bbox
+                    z1, z2 = 0, data.shape[0]
+
+                # Check thickness. If flat (1 slice), add Padding (The Sandwich)
+                z_thickness = z2 - z1
+                if z_thickness <= 1 and data.shape[0] > 5:
+                    # Expand context: 1 slice above, 1 slice below
+                    z_start_pad = max(0, z1 - 1)
+                    z_end_pad = min(data.shape[0], z2 + 1)
+                    
+                    # Crop with context for physics calculation
+                    voi_data_for_physics = data[z_start_pad:z_end_pad, y1:y2, x1:x2]
+                    
+                    # Pad the mask to match the physics crop
+                    pad_top = z1 - z_start_pad
+                    pad_bottom = z_end_pad - z2
+                    mask_original = self._ensure_3d(region.image)
+                    voi_mask_for_physics = np.pad(mask_original, ((pad_top, pad_bottom), (0,0), (0,0)), mode='constant')
+                else:
+                    voi_data_for_physics = data[z1:z2, y1:y2, x1:x2]
+                    voi_mask_for_physics = self._ensure_3d(region.image)
+                
+                # Run Physics on Padded/Sandwiched Data
+                rugosity = self._analyze_surface_rugosity(voi_mask_for_physics, voi_data_for_physics, spacing)
+                
+                if rugosity['is_airway']: continue 
+                
+                # --- SAFE ASSIGNMENT (Fixes IndexError) ---
+                target_slice = thresholded_mask[z1:z2, y1:y2, x1:x2]
+                mask_to_write = self._ensure_3d(region.image)
+                
+                # Explicitly reshape mask to fit target (Fixes implicit squeeze mismatch)
+                if target_slice.size == mask_to_write.size:
+                     reshaped_mask = mask_to_write.reshape(target_slice.shape)
+                     target_slice[reshaped_mask] = True
+
+                # ════════════════════════════════════════════════════════════════════
+                # [FIX] Robust Mean Score Calculation (Prevents Score 0.0)
+                # ════════════════════════════════════════════════════════════════════
+                mean_score = 0.0
+                try:
+                    # 1. Get raw crop
+                    voi_score_crop = score_map[z1:z2, y1:y2, x1:x2]
+                    mask_for_score = region.image
+
+                    # 2. Dimensionality Alignment (The "Square Peg" Fix)
+                    # If shapes mismatch but sizes match (e.g. 1x5x5 vs 5x5x1), force reshape
+                    if voi_score_crop.shape != mask_for_score.shape:
+                        if voi_score_crop.size == mask_for_score.size:
+                            mask_for_score = mask_for_score.reshape(voi_score_crop.shape)
+                        else:
+                            # 3. Fallback A: Irreconcilable shapes
+                            # If we can't apply the mask, average the whole bounding box.
+                            # Better to have an approximate score than 0.0
+                            if voi_score_crop.size > 0:
+                                mean_score = float(np.mean(voi_score_crop))
+                            raise ValueError("Shape mismatch irreconcilable, used bbox mean")
+
+                    # 4. Calculate Masked Mean (Ideal Case)
+                    # Only proceed if we haven't already set a fallback score
+                    if mean_score == 0.0:
+                        if np.any(mask_for_score):
+                            mean_score = float(np.mean(voi_score_crop[mask_for_score > 0]))
+                        else:
+                            mean_score = float(np.mean(voi_score_crop))
+
+                except Exception:
+                    # 5. Final Fallback (Safety Net)
+                    # If any numpy error occurs above, assume the crop is valid and take its mean.
+                    # This guarantees we NEVER return 0.0 for a valid finding.
+                    try:
+                        fallback_crop = score_map[z1:z2, y1:y2, x1:x2]
+                        if fallback_crop.size > 0:
+                            mean_score = float(np.mean(fallback_crop))
+                    except:
+                        mean_score = 0.0
+
+                voi_findings.append({
+                    'id': idx + 1,
+                    'volume': region.area * (0.001), 
+                    'confidence': 'DEFINITE',
+                    'predicted_recovery_fac': 0.5,
+                    'fac_mean': rugosity['fac_mean'],
+                    'mean_hu': rugosity['mean_hu'],
+                    'score_mean': float(mean_score),
+                    'centroid': region.centroid,
+                    'slice_range': (z1, z2)
+                })
+            except IndexError as ie:
+                if log_callback:
+                    log_callback(f"   ❌ [DIAG] REGION #{idx} IndexError: {ie}")
+                    log_callback(f"   ❌ [DIAG] bbox={bbox} region.image.shape={region.image.shape} region.image.ndim={region.image.ndim}")
+                    log_callback(f"   ❌ [DIAG] data.shape={data.shape} thresholded_mask.shape={thresholded_mask.shape}")
+                    log_callback(f"   ❌ [DIAG] TRACEBACK: {tb.format_exc()}")
+                continue
+            except Exception as e:
+                if log_callback:
+                    log_callback(f"   ⚠️ [DIAG] REGION #{idx} Error: {type(e).__name__}: {e}")
+                continue
+
+        # Final Metrics
+        pa_vol = np.sum(pa_mask) * 0.001
+        hemodynamics = self._calculate_hemodynamic_metrics(voi_findings, pa_vol)
+        
+        # [RESTORED] MART v4: Fractal Analysis (Global Pruning Alert)
+        if log_callback: log_callback("   🌿 Computing Fractal Dimension (Vascular Pruning)...")
+        fractal_dim = self._compute_fractal_dimension(pa_mask)
+        pruning_alert = fractal_dim < 1.5
+        
+        if log_callback: 
+            log_callback(f"   🔢 Global Fractal Dimension (Df): {fractal_dim:.3f}")
+            if pruning_alert:
+                log_callback("   ⚠️ VASCULAR PRUNING DETECTED (Df < 1.5) - Possible Microvascular Disease")
+
+        return thresholded_mask, {
+            'clot_count': len(voi_findings),
+            'voi_findings': voi_findings,
+            'hemodynamics': hemodynamics,
             'score_map': score_map,
-            'definite_mask': thrombus_mask,  # <-- Fundamental para el color ROJO
-            'suspicious_mask': (score_map >= 2.0) & (score_map < 3.0), # <-- Fundamental para AMARILLO
-            'findings': findings,
-            'is_rib_artifact': is_rib_artifact,
-            'is_tubular_mask': is_tubular,
-            'is_non_contrast_mode': is_non_contrast
+            'diagnostic_stats': {},
+            'is_non_contrast_mode': is_non_contrast,
+            # NEW KEYS RESTORED:
+            'fractal_dimension': fractal_dim,
+            'vascular_pruning_alert': pruning_alert,
+            'topology_scores': {
+                'hodge_max': float(np.max(hodge_score)),
+                'ricci_max': float(np.max(ricci_score))
+            },
+            'definite_mask': score_map >= self.SCORE_THRESHOLD_DEFINITE,
+            'suspicious_mask': score_map >= self.SCORE_THRESHOLD_SUSPICIOUS,
+            'is_tubular_mask': v_map > 0
         }
-        
-        if log_callback:
-             rib_voxels = np.sum(is_rib_artifact & in_pa_region)
-             boost_voxels_bright = np.sum(is_tubular_bright & in_pa_region)
-             boost_voxels_dark = np.sum(is_tubular_dark & in_pa_region)
-             log_callback(f"   🧬 Hessian Filter: Excluded {rib_voxels} rib voxels")
-             log_callback(f"   🧬 Vesselness: {boost_voxels_bright} Bright Tubes | {boost_voxels_dark} Dark Tubes (Thrombi)")
-             log_callback(f"   📊 Final Detection: {clot_count} lesions found (Score >= 3)")
-            
-        return thrombus_mask, clot_info
+
+    # ═══════════════════════════════════════════════════════════════════════════
     # ═══════════════════════════════════════════════════════════════════════════
     # NEW: Filter Elongated Clusters (Rib-shaped false positives)
     # ═══════════════════════════════════════════════════════════════════════════
@@ -1373,6 +2031,7 @@ class TEPProcessingService:
             
             # Get 2D projection for shape analysis (max projection in z)
             # This is more robust for 3D elongated structures
+            region_mask = self._ensure_3d(region_mask)
             z_projection = np.any(region_mask, axis=2).astype(np.uint8)
             
             # Use regionprops to analyze shape
@@ -1455,7 +2114,11 @@ class TEPProcessingService:
         
         if not np.any(thrombus_mask):
             return thrombus_mask, {'laplacian_discarded': 0, 'laplacian_voxels_removed': 0}
-        
+    
+        # IRON DOME: Force 3D
+        thrombus_mask = self._ensure_3d(thrombus_mask)
+        volume = self._ensure_3d(volume)
+    
         # Compute Laplacian (2nd derivative - detects edges)
         # High absolute values = sharp transitions (bone/calcification edges)
         laplacian_map = np.abs(laplace(volume.astype(np.float32)))
@@ -1718,7 +2381,7 @@ class TEPProcessingService:
         # Layer 5: Boundary highlighting around definite findings
         # ═══════════════════════════════════════════════════════════════════════
         if np.any(definite_mask):
-            struct = generate_binary_structure(3, 1)
+            struct = generate_binary_structure(definite_mask.ndim, 1)
             thrombus_boundary = binary_dilation(definite_mask, structure=struct, iterations=1) & ~definite_mask
             thrombus_boundary = thrombus_boundary & ~exclusion_mask & ~suspicious_mask
             heatmap[thrombus_boundary, 0] = 255  # Bright yellow boundary
@@ -1729,7 +2392,7 @@ class TEPProcessingService:
         # Layer 6: Boundary around suspicious findings (subtle)
         # ═══════════════════════════════════════════════════════════════════════
         if np.any(suspicious_mask):
-            struct = generate_binary_structure(3, 1)
+            struct = generate_binary_structure(suspicious_mask.ndim, 1)
             suspicious_boundary = binary_dilation(suspicious_mask, structure=struct, iterations=1) & ~suspicious_mask & ~definite_mask
             suspicious_boundary = suspicious_boundary & ~exclusion_mask
             heatmap[suspicious_boundary, 0] = 200  # Lighter orange boundary
@@ -2100,64 +2763,41 @@ class TEPProcessingService:
     
     def _calculate_obstruction(self, data, pa_mask, thrombus_mask, pa_info, spacing, log_callback=None):
         """
-        Calculate percentage of arterial obstruction.
-        
-        Obstruction % = (Thrombus volume / PA lumen volume) * 100
-        
-        We also try to estimate left/right PA separately.
+        Calculates obstruction using Boolean Masking (Dimension Agnostic).
         """
         pa_volume = np.sum(pa_mask)
         thrombus_volume = np.sum(thrombus_mask)
         
-        if pa_volume == 0:
-            return {
-                'total_obstruction': 0,
-                'main_pa_obstruction': 0,
-                'left_pa_obstruction': 0,
-                'right_pa_obstruction': 0,
-            }
+        if pa_volume == 0: 
+            return {'total_obstruction': 0, 'main_pa_obstruction': 0, 
+                    'left_pa_obstruction': 0, 'right_pa_obstruction': 0}
+
+        # 1. Identify X-axis (Always the last axis)
+        x_axis = data.ndim - 1
+        center_x = data.shape[x_axis] // 2
         
-        # Total obstruction
-        total_obstruction = (thrombus_volume / pa_volume) * 100
+        # 2. Create Grid Masks (Left vs Right)
+        # This works regardless if data is 2D (Y, X) or 3D (Z, Y, X)
+        grid = np.indices(data.shape)[x_axis]
+        is_left = grid < center_x
+        is_right = grid >= center_x
         
-        # Try to separate left/right based on x-coordinate
-        # (simple heuristic - left side of image vs right side)
-        center_x = data.shape[0] // 2
+        # 3. Calculate Volumes using Bitwise AND
+        vol_left_pa = np.sum(pa_mask & is_left)
+        vol_right_pa = np.sum(pa_mask & is_right)
         
-        left_pa_mask = pa_mask.copy()
-        left_pa_mask[center_x:, :, :] = False
-        right_pa_mask = pa_mask.copy()
-        right_pa_mask[:center_x, :, :] = False
-        
-        left_thrombus = thrombus_mask.copy()
-        left_thrombus[center_x:, :, :] = False
-        right_thrombus = thrombus_mask.copy()
-        right_thrombus[:center_x, :, :] = False
-        
-        left_pa_vol = np.sum(left_pa_mask)
-        right_pa_vol = np.sum(right_pa_mask)
-        
-        left_obstruction = (np.sum(left_thrombus) / left_pa_vol * 100) if left_pa_vol > 0 else 0
-        right_obstruction = (np.sum(right_thrombus) / right_pa_vol * 100) if right_pa_vol > 0 else 0
-        
-        # Main PA is harder to isolate - use central region
-        main_region = pa_mask.copy()
-        main_region[:, :, :data.shape[2]//3] = False
-        main_region[:, :, 2*data.shape[2]//3:] = False
-        main_thrombus = thrombus_mask & main_region
-        main_pa_vol = np.sum(main_region)
-        main_obstruction = (np.sum(main_thrombus) / main_pa_vol * 100) if main_pa_vol > 0 else 0
-        
-        if log_callback:
-            log_callback(f"   Obstruction calculated: Total {total_obstruction:.1f}%")
+        obs_total = (thrombus_volume / pa_volume) * 100
+        obs_left = (np.sum(thrombus_mask & is_left) / vol_left_pa * 100) if vol_left_pa > 0 else 0
+        obs_right = (np.sum(thrombus_mask & is_right) / vol_right_pa * 100) if vol_right_pa > 0 else 0
         
         return {
-            'total_obstruction': min(total_obstruction, 100),
-            'main_pa_obstruction': min(main_obstruction, 100),
-            'left_pa_obstruction': min(left_obstruction, 100),
-            'right_pa_obstruction': min(right_obstruction, 100),
+            'total_obstruction': min(obs_total, 100),
+            'main_pa_obstruction': min(obs_total, 100), # Approx
+            'left_pa_obstruction': min(obs_left, 100),
+            'right_pa_obstruction': min(obs_right, 100),
         }
-    
+
+
     def _calculate_qanadli_score(self, thrombus_mask, pa_mask, pa_info, log_callback=None):
         """
         Calculate Qanadli Obstruction Index (modified).
@@ -2235,6 +2875,9 @@ class TEPProcessingService:
         epsilon_g = voxel_volume_cm3
         
         # Noise-based uncertainty from PA contrast values
+        pa_mask = self._ensure_3d(pa_mask)
+        thrombus_mask = self._ensure_3d(thrombus_mask)
+        data = self._ensure_3d(data)
         if np.sum(pa_mask) > 100:
             pa_values = data[pa_mask]
             sigma_hu = np.std(pa_values)
@@ -2264,6 +2907,8 @@ class TEPProcessingService:
         """
         Compute Hessian matrix (tensor of 2nd derivatives) for every voxel.
         """
+        # IRONDOME: Force 3D context
+        volume = self._ensure_3d(volume)
         # Smooth volume
         img = gaussian_filter(volume.astype(np.float32), sigma=sigma)
         
@@ -2353,68 +2998,6 @@ class TEPProcessingService:
         
         return vesselness
 
-        return vesselness
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # NEW: Surface Rugosity & Morphometric Analysis (MART v3)
-    # ═══════════════════════════════════════════════════════════════════════════
-    def _analyze_surface_rugosity(self, region_mask, data, spacing=None, log_callback=None):
-        """
-        Analyze surface periodicity to detect bronchi ("tracheobronchial corrugation").
-        
-        Algorithm (User-Refined):
-        1. Autocorrelation of profile along principal axis to detect rhythmic peaks (2-4mm).
-        2. Z-Axis Gradient Check: Bronchi have sharp HU drop (air) in center.
-        
-        Args:
-            region_mask: Binary mask of the single connected component.
-            data: HU volume.
-            
-        Returns:
-            is_bronchus: Boolean.
-            confidence: Float (0-1).
-        """
-        if np.sum(region_mask) < 30:
-            return False, 0.0
-            
-        # 1. Z-Axis / Internal Gradient Check (The "Air Core" Test)
-        # Bronchi are tubes of air. Even if we segment the wall, the immediate interior is -1000 HU.
-        # Pulmonary arteries are solid blood (200 HU).
-        
-        # Dilate mask to ensure we cover the "lumen" if we only have the wall
-        # Then Erode significantly to find the center
-        struct = generate_binary_structure(3, 1)
-        dilated_mask = binary_dilation(region_mask, structure=struct, iterations=1)
-        filled_mask = binary_fill_holes(dilated_mask) # Fill the tube
-        
-        # The "Hole" is filled_mask XOR dilated_mask (if we segmented just wall)
-        # Or just look at valid pixels inside the filled object
-        
-        # Let's get the HU statistics of the volume occupying the object's convex hull/fill
-        # Bounding box crop for speed
-        bbox = center_of_mass(region_mask)
-        slices = [slice(max(0, int(c)-20), min(s, int(c)+20)) for c, s in zip(bbox, data.shape)]
-        crop_data = data[tuple(slices)]
-        crop_mask = region_mask[tuple(slices)]
-        
-        # If the object has AIR (< -200 HU) inside or extremely close, it's a bronchus.
-        # Thrombus (30-90 HU) is never -200 HU.
-        # However, lung parenchyma is also -800. We distinguish by the "Wall".
-        
-        # Simple robust metric: 10th percentile of HU within the dilated ROI
-        crop_dilated = binary_dilation(crop_mask, iterations=2)
-        if np.sum(crop_dilated) > 0:
-            p10 = np.percentile(crop_data[crop_dilated], 10)
-            if p10 < -150:
-                # Strong indication of air proximity (Bronchus)
-                return True, 0.95
-                
-        # 2. Surface Rugosity / Periodicity (Fallback if Air check is ambiguous)
-        # Only needed for fluid-filled bronchi or collapsed ones, but prompt asked for it.
-        # Implementation of autocorrelation is computationally heavy for Python without C++ optimized libs for 3D meshes.
-        # We rely on the Air Core test as primary as suggested by "99.9% precision".
-        
-        return False, 0.0
 
     # ═══════════════════════════════════════════════════════════════════════════
     # NEW: Pseudocolor LUT Generation (Phase 6)

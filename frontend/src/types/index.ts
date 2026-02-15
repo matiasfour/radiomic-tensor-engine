@@ -258,10 +258,44 @@ export interface ProcessingResult {
 	qanadli_score?: number;
 	contrast_quality?: string;
 	mean_thrombus_kurtosis?: number;
+	
+	// Phase 8: MART v3 Advanced Metrics
+	voi_findings?: VoiFinding[];
+	estimated_mpap?: number;
+	pvr_wood_units?: number;
+	rv_impact_index?: number;
+	primary_intervention_target?: string;
+	
 	source_volume?: string;
+
+	// UX Metadata (Diagnostic Station)
+	slices_meta?: SlicesMeta;
+	findings_pins?: FindingPin[];
 
 	// Audit Report PDF
 	audit_report?: string;
+}
+
+export interface SlicesMeta {
+	total_slices: number;
+	alerts_heatmap: number[];
+	alerts_flow: number[];
+}
+
+export interface FindingPin {
+	id: number;
+	type: 'TEP_DEFINITE' | 'TEP_SUSPICIOUS';
+	location: {
+		slice_z: number;
+		coord_x: number;
+		coord_y: number;
+	};
+	tooltip_data: {
+		score_total: number;
+		density_hu: number;
+		flow_coherence: number;
+		volume_mm3: number;
+	};
 }
 
 export interface ProcessingLog {
@@ -271,6 +305,19 @@ export interface ProcessingLog {
 	timestamp: string;
 	level: LogLevel;
 	metadata?: Record<string, unknown>;
+}
+
+export interface VoiFinding {
+	id: number;
+	volume: number;
+	score_mean: number;
+	fac_mean: number;
+	coherence_val: number;
+	predicted_recovery_fac?: number;
+	rescue_score?: number;
+	is_airway?: boolean;
+	slice_range: [number, number];
+	centroid: [number, number, number];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -319,6 +366,7 @@ export interface ViewerState {
 	windowLevel: number;
 	windowWidth: number;
 	zoom: number;
+	sliceOpacity: number;
 }
 
 export interface WorkstationState {

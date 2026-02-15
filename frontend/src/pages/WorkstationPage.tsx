@@ -283,6 +283,8 @@ Generado automáticamente por Radiomic Tensorial Workstation
 					studyId={String(study.id)}
 					modality={modality}
 					results={study.results || study.processing_result}
+					slicesMeta={(study.results || study.processing_result)?.slices_meta}
+					findingsPins={(study.results || study.processing_result)?.findings_pins}
 				/>
 			</main>
 

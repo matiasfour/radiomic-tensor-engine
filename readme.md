@@ -95,14 +95,17 @@ El motor TEP implementa un pipeline de 9 etapas con múltiples filtros de seguri
    │      - Anisotropía FAC: +1.0 pts
    │      - Rupture Boost (CI < 0.4): +2.0 pts
    ├─ 7f. NC MODE (Non-Contrast): Scoring adaptativo basado en Textura+Coherencia
-   ├─ 7g. CONTRAST INHIBITOR: HU > 220 → Score = 0 (Si contraste óptimo)
-   ├─ 7h. CENTERLINE VALIDATION: Distancia < 5mm
-   ├─ 7i. Filtrar clusters elongados (eccentricity > 0.85)
+   ├─ 7i. CONTRAST INHIBITOR: HU>220 → Score=0 (Si contraste óptimo)
    ├─ 7j. LAPLACIAN BONE VALIDATION: gradient > 500HU → descartar
    ├─ 7k. MORPHOMETRIC FILTER: Excluir Bronquios (Rugosidad + Air-Core)
-   └─ 7l. ROI STRICT INTERSECTION: detection = detection * domain_mask
-8. QUANTIFICATION      → Calcular Qanadli Score, volumen, obstrucción %
-9. OUTPUT              → Guardar NIfTI + Generar PDF Audit Report
+   └─ 7l. SURFACE PHYSICS: Tensor de Estructura (Rugosidad, FAC, Coherencia)
+8. HEMODYNAMICS & VIRTUAL LYSIS
+   ├─ 8a. Estimación de mPAP (Mean Pulmonary Arterial Pressure)
+   ├─ 8b. Cálculo de PVR (Resistencia Vascular Pulmonar)
+   ├─ 8c. RV Impact Index (Sobrecarga Ventricular Derecha)
+   └─ 8d. VIRTUAL LYSIS: Simulación de reperfusión y "Rescue Potential"
+9. QUANTIFICATION      → Calcular Qanadli Score, volumen, obstrucción %
+10. OUTPUT             → Guardar NIfTI + Generar PDF Audit Report
 ```
 
 ### Filtros de Seguridad Anatómica
@@ -130,6 +133,27 @@ SCORE = (HU×3) + (MK×1) + (FAC×1) + (RUPTURE_BOOST×2)
 Score ≥ 2  →  SUSPICIOUS (amarillo/naranja)
 Score ≥ 3  →  DEFINITE (rojo)
 ```
+
+### Advanced VOI Analysis & Hemodynamics (MART v3)
+
+El sistema ahora incorpora **física tensorial** y **modelado hemodinámico** para ir más allá de la simple detección:
+
+#### 1. Tensor Physics (Surface Rugosity)
+Analizamos la topología de cada VOI mediante **Structure Tensor**:
+- **Rugosidad**: Diferencia entre superficies lisas (vasos/trombos) y corrugadas (bronquios).
+- **FAC Surface**: La anisotropía en la superficie del objeto ayuda a distinguir paredes arteriales de flujo turbulento.
+
+#### 2. Hemodinámica Computacional
+Derivamos métricas clínicas críticas a partir de la carga trombótica volumétrica y su ubicación:
+- **mPAP (Mean Pulmonary Arterial Pressure)**: Estimada basada en obstrucción total y distensibilidad.
+- **PVR (Pulmonary Vascular Resistance)**: Unidades Wood.
+- **RV Impact Index**: Índice de sobrecarga ventricular derecha (0-1).
+
+#### 3. Virtual Lysis Simulation
+Simulamos el efecto de retirar cada trombo individual:
+- **Flow Recovery**: Cuánto mejoraría el FAC (flujo laminar) si se elimina este trombo.
+- **Rescue Potential**: Priorización de intervención basada en `Volumen × Delta_FAC`.
+- **Visualization**: Click en un trombo para ver su impacto hemodinámico específico.
 
 ### Valores de Referencia para TEP
 
@@ -228,6 +252,10 @@ class ProcessingResult:
     # TEP Results
     tep_heatmap, tep_pa_mask, tep_thrombus_mask, tep_roi_heatmap
     total_clot_volume, qanadli_score, obstruction_pct
+    # Hemodynamics
+    estimated_mpap, pvr_wood_units, rv_impact_index, primary_intervention_target
+    voi_findings  # Detailed list of all detected objects w/ metrics
+
     clot_count, contrast_quality, mean_thrombus_kurtosis
     audit_report  # PDF
 

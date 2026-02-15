@@ -1,0 +1,313 @@
+/* ═══════════════════════════════════════════════════════════════
+   DIAGNOSTIC STATION — Styles
+   ═══════════════════════════════════════════════════════════════ */
+
+.station {
+  position: relative;
+  background: #0a0a0a;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid #1f2937;
+}
+
+/* ─── Header ───────────────────────────────────────────────── */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  background: linear-gradient(135deg, #111827, #1f2937);
+  border-bottom: 1px solid #374151;
+}
+
+.headerTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #f3f4f6;
+  margin: 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.toolBtn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid #374151;
+  background: #1f2937;
+  color: #9ca3af;
+  font-size: 0.72rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.toolBtn:hover {
+  background: #374151;
+  color: #e5e7eb;
+}
+
+.toolBtnActive {
+  background: #7c3aed !important;
+  border-color: #8b5cf6 !important;
+  color: #fff !important;
+}
+
+/* ─── Main Layout ──────────────────────────────────────────── */
+.body {
+  display: flex;
+  position: relative;
+}
+
+.canvasWrapper {
+  flex: 1;
+  position: relative;
+  min-height: 520px;
+  background: #000;
+  cursor: crosshair;
+  overflow: hidden;
+}
+
+.canvas {
+  display: block;
+  width: 100%;
+  height: 520px;
+  image-rendering: pixelated;
+}
+
+/* ─── Slice Info HUD ───────────────────────────────────────── */
+.sliceHud {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(6px);
+  color: #e5e7eb;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  font-family: 'JetBrains Mono', monospace;
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* ─── Smart Scrollbar (Navigator) ──────────────────────────── */
+.scrollbar {
+  width: 36px;
+  position: relative;
+  background: #111827;
+  border-left: 1px solid #1f2937;
+  cursor: pointer;
+}
+
+.scrollTrack {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 10px;
+  width: 4px;
+  background: #1f2937;
+  border-radius: 2px;
+}
+
+.scrollTick {
+  position: absolute;
+  left: 4px;
+  width: 16px;
+  height: 2px;
+  border-radius: 1px;
+  transition: opacity 0.15s;
+}
+
+.scrollTickHeatmap {
+  background: #ef4444;
+}
+
+.scrollTickFlow {
+  background: #a855f7;
+}
+
+.scrollIndicator {
+  position: absolute;
+  left: 3px;
+  width: 18px;
+  height: 4px;
+  background: #3b82f6;
+  border-radius: 2px;
+  transition: top 0.1s ease;
+  box-shadow: 0 0 6px rgba(59, 130, 246, 0.5);
+}
+
+/* ─── Diagnostic Pins ──────────────────────────────────────── */
+.pin {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  z-index: 10;
+  cursor: pointer;
+  transition: transform 0.15s ease;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.5));
+}
+
+.pin:hover {
+  transform: translate(-50%, -100%) scale(1.3);
+  z-index: 15;
+}
+
+.pinIcon {
+  font-size: 20px;
+  line-height: 1;
+}
+
+/* ─── Tooltip Card ─────────────────────────────────────────── */
+.tooltip {
+  position: absolute;
+  z-index: 20;
+  background: linear-gradient(135deg, #1e1b4b, #312e81);
+  border: 1px solid #4338ca;
+  border-radius: 10px;
+  padding: 12px 14px;
+  min-width: 200px;
+  color: #e0e7ff;
+  font-size: 0.75rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+  animation: fadeIn 0.15s ease;
+}
+
+.tooltipHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-weight: 600;
+  font-size: 0.8rem;
+}
+
+.tooltipBadge {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.badgeDefinite {
+  background: #dc2626;
+  color: #fff;
+}
+
+.badgeSuspicious {
+  background: #f97316;
+  color: #fff;
+}
+
+.tooltipRow {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.tooltipLabel {
+  color: #a5b4fc;
+}
+
+.tooltipValue {
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* ─── Magnifier Lens ───────────────────────────────────────── */
+.magnifier {
+  position: absolute;
+  width: 140px;
+  height: 140px;
+  border-radius: 50%;
+  border: 2px solid rgba(139, 92, 246, 0.6);
+  box-shadow: 0 0 20px rgba(139, 92, 246, 0.3), inset 0 0 30px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 12;
+  display: none;
+}
+
+.magnifierActive {
+  display: block;
+}
+
+.magnifierCanvas {
+  width: 100%;
+  height: 100%;
+}
+
+/* ─── Footer ───────────────────────────────────────────────── */
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: #111827;
+  border-top: 1px solid #1f2937;
+  color: #6b7280;
+  font-size: 0.7rem;
+}
+
+.footerLegend {
+  display: flex;
+  gap: 14px;
+}
+
+.legendDot {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.dotRed { background: #ef4444; }
+.dotPurple { background: #a855f7; }
+.dotBlue { background: #3b82f6; }
+
+/* ─── Animations ───────────────────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Loading State ────────────────────────────────────────── */
+.loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 520px;
+  color: #9ca3af;
+  gap: 12px;
+}
+
+.spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid #1f2937;
+  border-top-color: #7c3aed;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

@@ -167,7 +167,7 @@ const STRATEGIES: Strategy[] = [
 					"7i. CONTRAST INHIBITOR: HU>220 → Score=0",
 					"7j. LAPLACIAN BONE VALIDATION: gradient > 500HU → discard",
 					"7k. MORPHOMETRIC FILTER: Exclude Bronchi (Rugosity + Air-Core)",
-					"7l. ROI STRICT INTERSECTION: detection = detection * domain_mask",
+					"7l. SURFACE PHYSICS (Tenor): Validate Rugosity, FAC, Coherence",
 				],
 				outputs: [
 					"thrombus_mask",
@@ -179,7 +179,27 @@ const STRATEGIES: Strategy[] = [
 			},
 			{
 				id: "tep-8",
-				name: "8. QUANTIFICATION",
+				name: "8. HEMODYNAMICS & VIRTUAL LYSIS",
+				service: "TEPProcessingService (MART v3)",
+				description: "Computational hemodynamics and intervention planning",
+				isNew: true,
+				substeps: [
+					"8a. Estimación de mPAP (Mean Pulmonary Arterial Pressure)",
+					"8b. Cálculo de PVR (Resistencia Vascular Pulmonar)",
+					"8c. RV Impact Index (Sobrecarga Ventricular Derecha)",
+					"8d. VIRTUAL LYSIS: Simulate flow restoration (FAC recovery)",
+					"8e. Prioritize lesions by 'Rescue Potential'",
+				],
+				outputs: [
+					"estimated_mpap",
+					"pvr_wood_units",
+					"rv_impact_index",
+					"primary_intervention_target",
+				],
+			},
+			{
+				id: "tep-9",
+				name: "9. QUANTIFICATION",
 				service: "TEPProcessingService",
 				description: "Calculate clinical metrics",
 				outputs: [
@@ -190,16 +210,16 @@ const STRATEGIES: Strategy[] = [
 				],
 			},
 			{
-				id: "tep-9",
-				name: "9. OUTPUT",
+				id: "tep-10",
+				name: "10. OUTPUT",
 				service: "views.py + AuditReportService",
 				description: "Save results and generate audit report",
 				isNew: true,
 				substeps: [
-					"9a. Save heatmap.nii.gz (normal visualization)",
-					"9b. Save coherence_map.nii.gz (flow analysis)",
-					"9c. Save pseudocolor_map.nii.gz (density visualization)",
-					"9d. Generate audit.pdf report with Coherence Validation",
+					"10a. Save heatmap.nii.gz (normal visualization)",
+					"10b. Save coherence_map.nii.gz (flow analysis)",
+					"10c. Save pseudocolor_map.nii.gz (density visualization)",
+					"10d. Generate audit.pdf report with Coherence Validation",
 				],
 				outputs: [
 					"heatmap.nii.gz",

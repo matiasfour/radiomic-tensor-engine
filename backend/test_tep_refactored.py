@@ -82,8 +82,8 @@ def test_configuration():
     print(f"✅ HU scoring: {service.SCORE_HU_POINTS} points (Restored for Sensitivity)")
     
     # Check bone dilation
-    assert service.BONE_DILATION_ITERATIONS == 5, f"Expected 5 iterations, got {service.BONE_DILATION_ITERATIONS}"
-    print(f"✅ Bone dilation: {service.BONE_DILATION_ITERATIONS} iterations")
+    assert service.BONE_DILATION_ITERATIONS == 8, f"Expected 8 iterations, got {service.BONE_DILATION_ITERATIONS}"
+    print(f"✅ Bone dilation: {service.BONE_DILATION_ITERATIONS} iterations (STRICT)")
     
     # Check contrast inhibitor
     assert service.CONTRAST_INHIBITOR_HU == 220, f"Expected 220 HU, got {service.CONTRAST_INHIBITOR_HU}"
@@ -97,6 +97,14 @@ def test_configuration():
     # Check bone threshold maintained at 700
     assert service.BONE_EXCLUSION_HU == 700, f"Expected 700 HU, got {service.BONE_EXCLUSION_HU}"
     print(f"✅ Bone threshold: {service.BONE_EXCLUSION_HU} HU (not lowered)")
+    
+    # Guard 1: Fat Guard - Raised thresholds
+    assert service.THROMBUS_RANGE == (40, 100), f"Expected (40, 100), got {service.THROMBUS_RANGE}"
+    print(f"✅ Fat Guard: THROMBUS_RANGE={service.THROMBUS_RANGE} (pericardial fat excluded)")
+    assert service.HEATMAP_HU_MIN == 40, f"Expected 40, got {service.HEATMAP_HU_MIN}"
+    print(f"✅ Fat Guard: HEATMAP_HU_MIN={service.HEATMAP_HU_MIN} (synced)")
+    assert service.ROI_EROSION_MM == 5.0, f"Expected 5.0, got {service.ROI_EROSION_MM}"
+    print(f"✅ Fat Guard: ROI_EROSION_MM={service.ROI_EROSION_MM}mm (stronger chest wall exclusion)")
     
     print("\n✅ All configuration parameters correct!")
 
@@ -292,9 +300,18 @@ def test_hessian_scoring():
     fac_map = np.zeros(shape, dtype=np.float32)
     exclusion_mask = np.zeros(shape, dtype=bool)
     
+    # [FIX] Match updated signature
+    coherence_map = np.zeros(shape, dtype=np.float32)
+    centerline = np.zeros(shape, dtype=bool)
+    centerline_info = {'centerline_voxels': 0, 'branch_points': 0}
+    spacing = np.array([1.0, 1.0, 1.0])
+    
     print("Running detection on Plate (Rib) vs Tube (Vessel)...")
     thrombus_mask, info = service._detect_filling_defects_enhanced(
-        data, pa_mask, mk_map, fac_map, exclusion_mask
+        data, pa_mask, mk_map, fac_map, coherence_map, exclusion_mask,
+        lung_mask=pa_mask, log_callback=log_callback, apply_contrast_inhibitor=True,
+        is_non_contrast=False, centerline=centerline, centerline_info=centerline_info,
+        z_guard_slices=False, spacing=spacing
     )
     
     # Check for Heatmap Masks (Critical Fix)

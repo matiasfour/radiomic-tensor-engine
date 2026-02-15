@@ -661,6 +661,10 @@ class StudyViewSet(viewsets.ModelViewSet):
         result.uncertainty_sigma = results['uncertainty_sigma']
         result.contrast_quality = results['contrast_quality'].get('contrast_quality', 'UNKNOWN')
         
+        # UX Metadata (Diagnostic Station)
+        result.slices_meta = results.get('slices_meta')
+        result.findings_pins = results.get('findings_pins')
+        
         # Generate Audit Report PDF
         log("Generating audit report PDF...", stage='OUTPUT')
         try:

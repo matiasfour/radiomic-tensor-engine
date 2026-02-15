@@ -233,26 +233,52 @@ const UnifiedUploadPage: React.FC = () => {
 					<p style={{ color: "var(--ws-text-muted)", marginBottom: "16px" }}>
 						o
 					</p>
-					<label
-						style={{
-							display: "inline-block",
-							padding: "12px 24px",
-							background: "var(--ws-text-accent)",
-							color: "var(--ws-bg-primary)",
-							borderRadius: "8px",
-							cursor: "pointer",
-							fontWeight: 600,
-						}}
-					>
-						Seleccionar Archivos
-						<input
-							type="file"
-							multiple
-							accept=".dcm,.dicom,application/dicom"
-							style={{ display: "none" }}
-							onChange={e => e.target.files && handleFiles(e.target.files)}
-						/>
-					</label>
+					<div style={{ display: "flex", gap: "12px", justifyContent: "center" }}>
+						<label
+							style={{
+								display: "inline-block",
+								padding: "12px 24px",
+								background: "var(--ws-text-accent)",
+								color: "var(--ws-bg-primary)",
+								borderRadius: "8px",
+								cursor: "pointer",
+								fontWeight: 600,
+							}}
+						>
+							📄 Archivos
+							<input
+								type="file"
+								multiple
+								// Remove restrictive accept to allow DICOMs without extension (e.g. I00003)
+								style={{ display: "none" }}
+								onChange={e => e.target.files && handleFiles(e.target.files)}
+							/>
+						</label>
+
+						<label
+							style={{
+								display: "inline-block",
+								padding: "12px 24px",
+								background: "var(--ws-bg-tertiary)",
+								border: "1px solid var(--ws-text-accent)",
+								color: "var(--ws-text-accent)",
+								borderRadius: "8px",
+								cursor: "pointer",
+								fontWeight: 600,
+							}}
+						>
+							📂 Carpeta
+							<input
+								type="file"
+								// @ts-expect-error - webkitdirectory is not standard but supported by browsers
+								webkitdirectory=""
+								directory=""
+								multiple
+								style={{ display: "none" }}
+								onChange={e => e.target.files && handleFiles(e.target.files)}
+							/>
+						</label>
+					</div>
 				</div>
 
 				{/* Selected Files */}

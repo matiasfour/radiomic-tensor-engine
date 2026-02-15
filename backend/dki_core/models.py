@@ -115,6 +115,10 @@ class ProcessingResult(models.Model):
     # 3D Viewer Compatibility
     source_volume = models.FileField(upload_to='results/source_volume/', blank=True, null=True, help_text="Original volume converted to NIfTI for 3D viewer")
     
+    # UX Metadata (Diagnostic Station)
+    slices_meta = models.JSONField(blank=True, null=True, help_text="Smart Scrollbar: alert Z-indices for heatmap and flow")
+    findings_pins = models.JSONField(blank=True, null=True, help_text="Diagnostic Pins: coordinate markers with score tooltips")
+    
     # Audit Report (PDF)
     audit_report = models.FileField(upload_to='results/audit_reports/', blank=True, null=True)
     

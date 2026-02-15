@@ -12,6 +12,7 @@ import {
 import styles from "./Viewer.module.css";
 
 interface TEPViewerProps {
+	sourceUrl?: string;
 	heatmapUrl?: string;
 	thrombusUrl?: string;
 	paUrl?: string;
@@ -22,6 +23,7 @@ interface TEPViewerProps {
 type ViewMode = "multiplanar" | "axial" | "sagittal" | "coronal" | "render3d";
 
 const TEPViewer: React.FC<TEPViewerProps> = ({
+	sourceUrl,
 	heatmapUrl,
 	thrombusUrl,
 	paUrl,
@@ -32,13 +34,24 @@ const TEPViewer: React.FC<TEPViewerProps> = ({
 	const nvRef = useRef<Niivue | null>(null);
 	const [isLoading, setIsLoading] = useState(true);
 	const [viewMode, setViewMode] = useState<ViewMode>("multiplanar");
+	const [showHeatmap, setShowHeatmap] = useState(true);
 	const [showThrombus, setShowThrombus] = useState(true);
 	const [showPA, setShowPA] = useState(true);
 	const [showROI, setShowROI] = useState(false);
+	const [heatmapOpacity, setHeatmapOpacity] = useState(0.5);
 	const [thrombusOpacity, setThrombusOpacity] = useState(0.7);
 	const [paOpacity, setPaOpacity] = useState(0.5);
 	const [roiOpacity, setRoiOpacity] = useState(0.3);
 	const [error, setError] = useState<string | null>(null);
+
+	// Track which volume indices correspond to which layers
+	const layerIndices = useRef<{
+		source: number;
+		heatmap: number;
+		thrombus: number;
+		pa: number;
+		roi: number;
+	}>({ source: -1, heatmap: -1, thrombus: -1, pa: -1, roi: -1 });
 
 	const updateSliceType = useCallback((mode: ViewMode) => {
 		if (!nvRef.current) return;
@@ -64,7 +77,9 @@ const TEPViewer: React.FC<TEPViewerProps> = ({
 	}, []);
 
 	useEffect(() => {
-		if (!canvasRef.current || !heatmapUrl) return;
+		if (!canvasRef.current) return;
+		// Need at least source or heatmap to display anything
+		if (!sourceUrl && !heatmapUrl) return;
 
 		const initViewer = async () => {
 			setIsLoading(true);
@@ -83,69 +98,89 @@ const TEPViewer: React.FC<TEPViewerProps> = ({
 				nv.setSliceType(SLICE_TYPE.MULTIPLANAR);
 				nvRef.current = nv;
 
-				// Prepare volumes to load
+				// Build volume list with proper layering
 				const volumes: Array<{
 					url: string;
 					colormap?: string;
 					opacity?: number;
 				}> = [];
 
-				// Base heatmap volume
-				volumes.push({
-					url: heatmapUrl,
-					colormap: "gray",
-					opacity: 1.0,
-				});
+				let idx = 0;
+				const indices = { source: -1, heatmap: -1, thrombus: -1, pa: -1, roi: -1 };
 
-				// Load thrombus overlay if available
+				// Layer 0: Source CT volume (base anatomy)
+				if (sourceUrl) {
+					volumes.push({
+						url: sourceUrl,
+						colormap: "gray",
+						opacity: 1.0,
+					});
+					indices.source = idx++;
+				}
+
+				// Layer 1: Heatmap overlay (analysis results)
+				if (heatmapUrl) {
+					volumes.push({
+						url: heatmapUrl,
+						colormap: sourceUrl ? "hot" : "gray",
+						opacity: sourceUrl ? heatmapOpacity : 1.0,
+					});
+					indices.heatmap = idx++;
+				}
+
+				// Layer 2: Thrombus overlay
 				if (thrombusUrl) {
 					volumes.push({
 						url: thrombusUrl,
 						colormap: "red",
 						opacity: thrombusOpacity,
 					});
+					indices.thrombus = idx++;
 				}
 
-				// Load pulmonary artery overlay if available
+				// Layer 3: PA overlay
 				if (paUrl) {
 					volumes.push({
 						url: paUrl,
 						colormap: "green",
 						opacity: paOpacity,
 					});
+					indices.pa = idx++;
 				}
 
-				// Load ROI overlay if available (CYAN domain boundaries)
+				// Layer 4: ROI overlay
 				if (roiUrl) {
 					volumes.push({
 						url: roiUrl,
 						colormap: "blue",
 						opacity: showROI ? roiOpacity : 0,
 					});
+					indices.roi = idx++;
 				}
+
+				layerIndices.current = indices;
 
 				await nv.loadVolumes(volumes);
 
 				// Apply colormaps after loading
-				// Volume indices: 0=heatmap, 1=thrombus(if exists), 2=PA(if exists), 3=ROI(if exists)
-				let volumeIdx = 0;
-				if (nv.volumes.length > volumeIdx) {
-					nv.setColormap(nv.volumes[volumeIdx].id, "gray");
+				if (indices.source >= 0 && nv.volumes.length > indices.source) {
+					nv.setColormap(nv.volumes[indices.source].id, "gray");
 				}
-				volumeIdx++;
-				if (thrombusUrl && nv.volumes.length > volumeIdx) {
-					nv.setColormap(nv.volumes[volumeIdx].id, "red");
-					nv.setOpacity(volumeIdx, thrombusOpacity);
-					volumeIdx++;
+				if (indices.heatmap >= 0 && nv.volumes.length > indices.heatmap) {
+					nv.setColormap(nv.volumes[indices.heatmap].id, sourceUrl ? "hot" : "gray");
+					nv.setOpacity(indices.heatmap, sourceUrl ? (showHeatmap ? heatmapOpacity : 0) : 1.0);
 				}
-				if (paUrl && nv.volumes.length > volumeIdx) {
-					nv.setColormap(nv.volumes[volumeIdx].id, "green");
-					nv.setOpacity(volumeIdx, paOpacity);
-					volumeIdx++;
+				if (indices.thrombus >= 0 && nv.volumes.length > indices.thrombus) {
+					nv.setColormap(nv.volumes[indices.thrombus].id, "red");
+					nv.setOpacity(indices.thrombus, showThrombus ? thrombusOpacity : 0);
 				}
-				if (roiUrl && nv.volumes.length > volumeIdx) {
-					nv.setColormap(nv.volumes[volumeIdx].id, "blue");
-					nv.setOpacity(volumeIdx, showROI ? roiOpacity : 0);
+				if (indices.pa >= 0 && nv.volumes.length > indices.pa) {
+					nv.setColormap(nv.volumes[indices.pa].id, "green");
+					nv.setOpacity(indices.pa, showPA ? paOpacity : 0);
+				}
+				if (indices.roi >= 0 && nv.volumes.length > indices.roi) {
+					nv.setColormap(nv.volumes[indices.roi].id, "blue");
+					nv.setOpacity(indices.roi, showROI ? roiOpacity : 0);
 				}
 
 				setIsLoading(false);
@@ -164,13 +199,22 @@ const TEPViewer: React.FC<TEPViewerProps> = ({
 			nvRef.current = null;
 		};
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [heatmapUrl, thrombusUrl, paUrl, roiUrl]);
+	}, [sourceUrl, heatmapUrl, thrombusUrl, paUrl, roiUrl]);
+
+	// Update heatmap opacity
+	useEffect(() => {
+		if (!nvRef.current || !heatmapUrl || !sourceUrl) return;
+		const idx = layerIndices.current.heatmap;
+		if (idx >= 0 && nvRef.current.volumes.length > idx) {
+			nvRef.current.setOpacity(idx, showHeatmap ? heatmapOpacity : 0);
+		}
+	}, [heatmapOpacity, showHeatmap, heatmapUrl, sourceUrl]);
 
 	// Update thrombus opacity
 	useEffect(() => {
 		if (!nvRef.current || !thrombusUrl) return;
-		const idx = 1; // thrombus is always index 1 if it exists
-		if (nvRef.current.volumes.length > idx) {
+		const idx = layerIndices.current.thrombus;
+		if (idx >= 0 && nvRef.current.volumes.length > idx) {
 			nvRef.current.setOpacity(idx, showThrombus ? thrombusOpacity : 0);
 		}
 	}, [thrombusOpacity, showThrombus, thrombusUrl]);
@@ -178,22 +222,20 @@ const TEPViewer: React.FC<TEPViewerProps> = ({
 	// Update PA opacity
 	useEffect(() => {
 		if (!nvRef.current || !paUrl) return;
-		const idx = thrombusUrl ? 2 : 1; // PA index depends on whether thrombus exists
-		if (nvRef.current.volumes.length > idx) {
+		const idx = layerIndices.current.pa;
+		if (idx >= 0 && nvRef.current.volumes.length > idx) {
 			nvRef.current.setOpacity(idx, showPA ? paOpacity : 0);
 		}
-	}, [paOpacity, showPA, paUrl, thrombusUrl]);
+	}, [paOpacity, showPA, paUrl]);
 
 	// Update ROI opacity
 	useEffect(() => {
 		if (!nvRef.current || !roiUrl) return;
-		let idx = 1;
-		if (thrombusUrl) idx++;
-		if (paUrl) idx++;
-		if (nvRef.current.volumes.length > idx) {
+		const idx = layerIndices.current.roi;
+		if (idx >= 0 && nvRef.current.volumes.length > idx) {
 			nvRef.current.setOpacity(idx, showROI ? roiOpacity : 0);
 		}
-	}, [roiOpacity, showROI, roiUrl, thrombusUrl, paUrl]);
+	}, [roiOpacity, showROI, roiUrl]);
 
 	const handleViewModeChange = (mode: ViewMode) => {
 		setViewMode(mode);
@@ -206,7 +248,7 @@ const TEPViewer: React.FC<TEPViewerProps> = ({
 		setViewMode("multiplanar");
 	};
 
-	if (!heatmapUrl) {
+	if (!heatmapUrl && !sourceUrl) {
 		return (
 			<div
 				className={styles.container}
@@ -218,11 +260,79 @@ const TEPViewer: React.FC<TEPViewerProps> = ({
 				}}
 			>
 				<p style={{ color: "#6b7280" }}>
-					No heatmap available for 3D visualization
+					No volumes available for 3D visualization
 				</p>
 			</div>
 		);
 	}
+
+	// Helper to render a layer control row
+	const renderLayerControl = (
+		label: string,
+		color: string,
+		show: boolean,
+		setShow: (v: boolean) => void,
+		opacity: number,
+		setOpacity: (v: number) => void,
+		activeColor: string,
+		activeBg: string,
+	) => (
+		<div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+			<button
+				onClick={() => setShow(!show)}
+				style={{
+					display: "flex",
+					alignItems: "center",
+					gap: "6px",
+					padding: "6px 10px",
+					borderRadius: "4px",
+					border: "none",
+					cursor: "pointer",
+					backgroundColor: show ? activeBg : "#f3f4f6",
+					color: show ? activeColor : "#6b7280",
+				}}
+			>
+				{show ? (
+					<Eye className="h-4 w-4" />
+				) : (
+					<EyeOff className="h-4 w-4" />
+				)}
+				<span style={{ fontSize: "0.75rem", fontWeight: 500 }}>
+					{label}
+				</span>
+				<span
+					style={{
+						width: "12px",
+						height: "12px",
+						backgroundColor: color,
+						borderRadius: "2px",
+					}}
+				/>
+			</button>
+			{show && (
+				<div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+					<input
+						type="range"
+						min="0"
+						max="1"
+						step="0.1"
+						value={opacity}
+						onChange={e => setOpacity(parseFloat(e.target.value))}
+						style={{ width: "80px" }}
+					/>
+					<span
+						style={{
+							fontSize: "0.7rem",
+							color: "#6b7280",
+							minWidth: "35px",
+						}}
+					>
+						{Math.round(opacity * 100)}%
+					</span>
+				</div>
+			)}
+		</div>
+	);
 
 	return (
 		<div className={styles.container}>
@@ -253,91 +363,42 @@ const TEPViewer: React.FC<TEPViewerProps> = ({
 				</h3>
 
 				<div style={{ display: "flex", gap: "4px" }}>
-					<button
-						onClick={() => handleViewModeChange("multiplanar")}
-						style={{
-							padding: "6px 12px",
-							borderRadius: "4px",
-							border: "none",
-							cursor: "pointer",
-							fontSize: "0.75rem",
-							fontWeight: 500,
-							backgroundColor:
-								viewMode === "multiplanar" ? "#dc2626" : "#e5e7eb",
-							color: viewMode === "multiplanar" ? "white" : "#374151",
-							display: "flex",
-							alignItems: "center",
-						}}
-						title="Multiplanar View"
-					>
-						<Grid3X3 className="h-4 w-4" />
-					</button>
-					<button
-						onClick={() => handleViewModeChange("axial")}
-						style={{
-							padding: "6px 12px",
-							borderRadius: "4px",
-							border: "none",
-							cursor: "pointer",
-							fontSize: "0.75rem",
-							fontWeight: 500,
-							backgroundColor: viewMode === "axial" ? "#dc2626" : "#e5e7eb",
-							color: viewMode === "axial" ? "white" : "#374151",
-						}}
-						title="Axial View"
-					>
-						A
-					</button>
-					<button
-						onClick={() => handleViewModeChange("sagittal")}
-						style={{
-							padding: "6px 12px",
-							borderRadius: "4px",
-							border: "none",
-							cursor: "pointer",
-							fontSize: "0.75rem",
-							fontWeight: 500,
-							backgroundColor: viewMode === "sagittal" ? "#dc2626" : "#e5e7eb",
-							color: viewMode === "sagittal" ? "white" : "#374151",
-						}}
-						title="Sagittal View"
-					>
-						S
-					</button>
-					<button
-						onClick={() => handleViewModeChange("coronal")}
-						style={{
-							padding: "6px 12px",
-							borderRadius: "4px",
-							border: "none",
-							cursor: "pointer",
-							fontSize: "0.75rem",
-							fontWeight: 500,
-							backgroundColor: viewMode === "coronal" ? "#dc2626" : "#e5e7eb",
-							color: viewMode === "coronal" ? "white" : "#374151",
-						}}
-						title="Coronal View"
-					>
-						C
-					</button>
-					<button
-						onClick={() => handleViewModeChange("render3d")}
-						style={{
-							padding: "6px 12px",
-							borderRadius: "4px",
-							border: "none",
-							cursor: "pointer",
-							fontSize: "0.75rem",
-							fontWeight: 500,
-							backgroundColor: viewMode === "render3d" ? "#dc2626" : "#e5e7eb",
-							color: viewMode === "render3d" ? "white" : "#374151",
-							display: "flex",
-							alignItems: "center",
-						}}
-						title="3D Render"
-					>
-						<Maximize2 className="h-4 w-4" />
-					</button>
+					{(["multiplanar", "axial", "sagittal", "coronal", "render3d"] as ViewMode[]).map(
+						mode => (
+							<button
+								key={mode}
+								onClick={() => handleViewModeChange(mode)}
+								style={{
+									padding: "6px 12px",
+									borderRadius: "4px",
+									border: "none",
+									cursor: "pointer",
+									fontSize: "0.75rem",
+									fontWeight: 500,
+									backgroundColor:
+										viewMode === mode ? "#dc2626" : "#e5e7eb",
+									color: viewMode === mode ? "white" : "#374151",
+									display: "flex",
+									alignItems: "center",
+								}}
+								title={
+									mode === "multiplanar"
+										? "Multiplanar View"
+										: mode === "render3d"
+											? "3D Render"
+											: `${mode.charAt(0).toUpperCase() + mode.slice(1)} View`
+								}
+							>
+								{mode === "multiplanar" ? (
+									<Grid3X3 className="h-4 w-4" />
+								) : mode === "render3d" ? (
+									<Maximize2 className="h-4 w-4" />
+								) : (
+									mode.charAt(0).toUpperCase()
+								)}
+							</button>
+						),
+					)}
 					<button
 						onClick={resetView}
 						style={{
@@ -425,239 +486,88 @@ const TEPViewer: React.FC<TEPViewerProps> = ({
 				/>
 			</div>
 
-			{/* Overlay Controls */}
-			{(thrombusUrl || paUrl || roiUrl) && (
+			{/* Layer Controls */}
+			<div
+				style={{
+					padding: "12px 16px",
+					borderTop: "1px solid #e5e7eb",
+					backgroundColor: "#f9fafb",
+				}}
+			>
 				<div
 					style={{
-						padding: "12px 16px",
-						borderTop: "1px solid #e5e7eb",
-						backgroundColor: "#f9fafb",
+						display: "flex",
+						alignItems: "center",
+						gap: "8px",
+						marginBottom: "12px",
 					}}
 				>
-					<div
+					<Layers className="h-4 w-4" style={{ color: "#6b7280" }} />
+					<span
 						style={{
-							display: "flex",
-							alignItems: "center",
-							gap: "8px",
-							marginBottom: "12px",
+							fontSize: "0.875rem",
+							fontWeight: 500,
+							color: "#374151",
 						}}
 					>
-						<Layers className="h-4 w-4" style={{ color: "#6b7280" }} />
-						<span
-							style={{
-								fontSize: "0.875rem",
-								fontWeight: 500,
-								color: "#374151",
-							}}
-						>
-							Overlay Controls
-						</span>
-					</div>
-
-					<div style={{ display: "flex", gap: "24px", flexWrap: "wrap" }}>
-						{/* ROI Toggle - First position for prominence */}
-						{roiUrl && (
-							<div
-								style={{ display: "flex", alignItems: "center", gap: "12px" }}
-							>
-								<button
-									onClick={() => setShowROI(!showROI)}
-									style={{
-										display: "flex",
-										alignItems: "center",
-										gap: "6px",
-										padding: "6px 10px",
-										borderRadius: "4px",
-										border: "none",
-										cursor: "pointer",
-										backgroundColor: showROI ? "#cffafe" : "#f3f4f6",
-										color: showROI ? "#0891b2" : "#6b7280",
-									}}
-								>
-									{showROI ? (
-										<Eye className="h-4 w-4" />
-									) : (
-										<EyeOff className="h-4 w-4" />
-									)}
-									<span style={{ fontSize: "0.75rem", fontWeight: 500 }}>
-										ROI
-									</span>
-									<span
-										style={{
-											width: "12px",
-											height: "12px",
-											backgroundColor: "#06b6d4",
-											borderRadius: "2px",
-										}}
-									/>
-								</button>
-								{showROI && (
-									<div
-										style={{
-											display: "flex",
-											alignItems: "center",
-											gap: "8px",
-										}}
-									>
-										<input
-											type="range"
-											min="0"
-											max="1"
-											step="0.1"
-											value={roiOpacity}
-											onChange={e => setRoiOpacity(parseFloat(e.target.value))}
-											style={{ width: "80px" }}
-										/>
-										<span
-											style={{
-												fontSize: "0.7rem",
-												color: "#6b7280",
-												minWidth: "35px",
-											}}
-										>
-											{Math.round(roiOpacity * 100)}%
-										</span>
-									</div>
-								)}
-							</div>
-						)}
-
-						{thrombusUrl && (
-							<div
-								style={{ display: "flex", alignItems: "center", gap: "12px" }}
-							>
-								<button
-									onClick={() => setShowThrombus(!showThrombus)}
-									style={{
-										display: "flex",
-										alignItems: "center",
-										gap: "6px",
-										padding: "6px 10px",
-										borderRadius: "4px",
-										border: "none",
-										cursor: "pointer",
-										backgroundColor: showThrombus ? "#fee2e2" : "#f3f4f6",
-										color: showThrombus ? "#dc2626" : "#6b7280",
-									}}
-								>
-									{showThrombus ? (
-										<Eye className="h-4 w-4" />
-									) : (
-										<EyeOff className="h-4 w-4" />
-									)}
-									<span style={{ fontSize: "0.75rem", fontWeight: 500 }}>
-										Thrombus
-									</span>
-									<span
-										style={{
-											width: "12px",
-											height: "12px",
-											backgroundColor: "#dc2626",
-											borderRadius: "2px",
-										}}
-									/>
-								</button>
-								{showThrombus && (
-									<div
-										style={{
-											display: "flex",
-											alignItems: "center",
-											gap: "8px",
-										}}
-									>
-										<input
-											type="range"
-											min="0"
-											max="1"
-											step="0.1"
-											value={thrombusOpacity}
-											onChange={e =>
-												setThrombusOpacity(parseFloat(e.target.value))
-											}
-											style={{ width: "80px" }}
-										/>
-										<span
-											style={{
-												fontSize: "0.7rem",
-												color: "#6b7280",
-												minWidth: "35px",
-											}}
-										>
-											{Math.round(thrombusOpacity * 100)}%
-										</span>
-									</div>
-								)}
-							</div>
-						)}
-
-						{paUrl && (
-							<div
-								style={{ display: "flex", alignItems: "center", gap: "12px" }}
-							>
-								<button
-									onClick={() => setShowPA(!showPA)}
-									style={{
-										display: "flex",
-										alignItems: "center",
-										gap: "6px",
-										padding: "6px 10px",
-										borderRadius: "4px",
-										border: "none",
-										cursor: "pointer",
-										backgroundColor: showPA ? "#dcfce7" : "#f3f4f6",
-										color: showPA ? "#16a34a" : "#6b7280",
-									}}
-								>
-									{showPA ? (
-										<Eye className="h-4 w-4" />
-									) : (
-										<EyeOff className="h-4 w-4" />
-									)}
-									<span style={{ fontSize: "0.75rem", fontWeight: 500 }}>
-										Pulmonary Arteries
-									</span>
-									<span
-										style={{
-											width: "12px",
-											height: "12px",
-											backgroundColor: "#22c55e",
-											borderRadius: "2px",
-										}}
-									/>
-								</button>
-								{showPA && (
-									<div
-										style={{
-											display: "flex",
-											alignItems: "center",
-											gap: "8px",
-										}}
-									>
-										<input
-											type="range"
-											min="0"
-											max="1"
-											step="0.1"
-											value={paOpacity}
-											onChange={e => setPaOpacity(parseFloat(e.target.value))}
-											style={{ width: "80px" }}
-										/>
-										<span
-											style={{
-												fontSize: "0.7rem",
-												color: "#6b7280",
-												minWidth: "35px",
-											}}
-										>
-											{Math.round(paOpacity * 100)}%
-										</span>
-									</div>
-								)}
-							</div>
-						)}
-					</div>
+						Layer Controls
+					</span>
 				</div>
-			)}
+
+				<div style={{ display: "flex", gap: "24px", flexWrap: "wrap" }}>
+					{/* Heatmap overlay (only show controls when source volume exists) */}
+					{heatmapUrl && sourceUrl &&
+						renderLayerControl(
+							"Heatmap",
+							"#f97316",
+							showHeatmap,
+							setShowHeatmap,
+							heatmapOpacity,
+							setHeatmapOpacity,
+							"#ea580c",
+							"#fff7ed",
+						)}
+
+					{/* Thrombus */}
+					{thrombusUrl &&
+						renderLayerControl(
+							"Thrombus",
+							"#dc2626",
+							showThrombus,
+							setShowThrombus,
+							thrombusOpacity,
+							setThrombusOpacity,
+							"#dc2626",
+							"#fee2e2",
+						)}
+
+					{/* Pulmonary Arteries */}
+					{paUrl &&
+						renderLayerControl(
+							"Pulmonary Arteries",
+							"#22c55e",
+							showPA,
+							setShowPA,
+							paOpacity,
+							setPaOpacity,
+							"#16a34a",
+							"#dcfce7",
+						)}
+
+					{/* ROI */}
+					{roiUrl &&
+						renderLayerControl(
+							"ROI",
+							"#06b6d4",
+							showROI,
+							setShowROI,
+							roiOpacity,
+							setRoiOpacity,
+							"#0891b2",
+							"#cffafe",
+						)}
+				</div>
+			</div>
 
 			{/* Instructions Footer */}
 			<div
