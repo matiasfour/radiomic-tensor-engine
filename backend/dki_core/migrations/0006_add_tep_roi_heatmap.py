@@ -10,7 +10,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
+        migrations.AlterField(
             model_name='processingresult',
             name='tep_roi_heatmap',
             field=models.FileField(blank=True, null=True, upload_to='results/tep_roi/'),

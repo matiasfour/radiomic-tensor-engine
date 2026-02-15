@@ -10,7 +10,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
+        migrations.AlterField(
             model_name='processingresult',
             name='pseudocolor_map',
             field=models.FileField(blank=True, null=True, upload_to='results/pseudocolor/'),

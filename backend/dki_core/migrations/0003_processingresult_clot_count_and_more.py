@@ -10,62 +10,62 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
+        migrations.AlterField(
             model_name='processingresult',
             name='clot_count',
             field=models.IntegerField(blank=True, null=True),
         ),
-        migrations.AddField(
+        migrations.AlterField(
             model_name='processingresult',
             name='contrast_quality',
             field=models.CharField(blank=True, max_length=20, null=True),
         ),
-        migrations.AddField(
+        migrations.AlterField(
             model_name='processingresult',
             name='left_pa_obstruction_pct',
             field=models.FloatField(blank=True, null=True),
         ),
-        migrations.AddField(
+        migrations.AlterField(
             model_name='processingresult',
             name='main_pa_obstruction_pct',
             field=models.FloatField(blank=True, null=True),
         ),
-        migrations.AddField(
+        migrations.AlterField(
             model_name='processingresult',
             name='pulmonary_artery_volume',
             field=models.FloatField(blank=True, null=True),
         ),
-        migrations.AddField(
+        migrations.AlterField(
             model_name='processingresult',
             name='qanadli_score',
             field=models.FloatField(blank=True, null=True),
         ),
-        migrations.AddField(
+        migrations.AlterField(
             model_name='processingresult',
             name='right_pa_obstruction_pct',
             field=models.FloatField(blank=True, null=True),
         ),
-        migrations.AddField(
+        migrations.AlterField(
             model_name='processingresult',
             name='tep_heatmap',
             field=models.FileField(blank=True, null=True, upload_to='results/tep_heatmap/'),
         ),
-        migrations.AddField(
+        migrations.AlterField(
             model_name='processingresult',
             name='tep_pa_mask',
             field=models.FileField(blank=True, null=True, upload_to='results/tep_pa/'),
         ),
-        migrations.AddField(
+        migrations.AlterField(
             model_name='processingresult',
             name='tep_thrombus_mask',
             field=models.FileField(blank=True, null=True, upload_to='results/tep_thrombus/'),
         ),
-        migrations.AddField(
+        migrations.AlterField(
             model_name='processingresult',
             name='total_clot_volume',
             field=models.FloatField(blank=True, null=True),
         ),
-        migrations.AddField(
+        migrations.AlterField(
             model_name='processingresult',
             name='total_obstruction_pct',
             field=models.FloatField(blank=True, null=True),

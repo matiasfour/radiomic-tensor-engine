@@ -10,7 +10,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
+        migrations.AlterField(
             model_name='processingresult',
             name='source_volume',
             field=models.FileField(blank=True, help_text='Original volume converted to NIfTI for 3D viewer', null=True, upload_to='results/source_volume/'),
