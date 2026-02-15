@@ -143,15 +143,40 @@ USE_TZ = True
 STATIC_URL = 'static/'
 
 # Media Configuration (DKI Files)
-# On Lightning AI, use persistent storage path
-LIGHTNING_MEDIA_PATH = Path('/teamspace/studios/this_studio/media')
+# All generated files (DICOM archives, extracted folders, NIfTI results, PDFs)
+# are stored under MEDIA_ROOT.  On Lightning AI this MUST point to persistent
+# storage so files survive restarts and are served via /media/ URLs.
 
-if os.environ.get('LIGHTNING_CLOUD') == 'true' and LIGHTNING_MEDIA_PATH.exists():
-    MEDIA_ROOT = LIGHTNING_MEDIA_PATH
-    print(f"⚡ Using Persistent Lightning Storage: {MEDIA_ROOT}")
-else:
-    MEDIA_ROOT = BASE_DIR / 'media'
-    print(f"📂 Using Local Storage: {MEDIA_ROOT}")
+def _resolve_media_root():
+    """Pick the best MEDIA_ROOT: env-var → well-known Lightning paths → local."""
+    # 1. Explicit env override (set in start_server.sh)
+    env_path = os.environ.get('MEDIA_ROOT')
+    if env_path:
+        p = Path(env_path)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    # 2. Lightning AI – try well-known persistent paths
+    if os.environ.get('LIGHTNING_CLOUD') == 'true':
+        candidates = [
+            Path('/teamspace/studios/this_studio/media'),
+            Path('/teamspace/s3_connections/media'),
+            Path('/home/zeus/media'),
+        ]
+        for candidate in candidates:
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+                return candidate
+            except OSError:
+                continue
+
+    # 3. Local fallback
+    local = BASE_DIR / 'media'
+    local.mkdir(parents=True, exist_ok=True)
+    return local
+
+MEDIA_ROOT = _resolve_media_root()
+print(f"{'⚡' if os.environ.get('LIGHTNING_CLOUD') == 'true' else '📂'} MEDIA_ROOT → {MEDIA_ROOT}")
 
 MEDIA_URL = '/media/'
 

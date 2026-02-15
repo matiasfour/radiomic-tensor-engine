@@ -19,12 +19,18 @@ from django.urls import path, include, re_path
 from django.views.generic import TemplateView
 from django.conf import settings
 from django.conf.urls.static import static
+from django.views.static import serve as static_serve
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('dki_core.urls')),
+
+    # Serve media files (generated NIfTI, PDFs, DICOM archives) in all modes.
+    # In a CDN-backed production deploy you'd use nginx/S3 instead, but on
+    # Lightning AI (single-server staging) Django must serve them directly.
+    re_path(r'^media/(?P<path>.*)$', static_serve, {'document_root': settings.MEDIA_ROOT}),
     
     # Esta regla debe ir AL FINAL DE TODO:
     # Cualquier otra cosa -> Manda el Frontend (React)
     re_path(r'^.*$', TemplateView.as_view(template_name='index.html')),
-] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+]
