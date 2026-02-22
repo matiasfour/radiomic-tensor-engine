@@ -1,3 +1,4 @@
+import uuid
 from django.db import models
 
 
@@ -38,6 +39,7 @@ class Study(models.Model):
         ('FAILED', 'Failed'),
     ]
 
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     modality = models.CharField(max_length=20, choices=MODALITY_CHOICES, default='AUTO')
     detected_modality = models.CharField(max_length=20, blank=True, null=True)
     patient_id = models.CharField(max_length=64, blank=True, null=True)

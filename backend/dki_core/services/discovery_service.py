@@ -142,6 +142,7 @@ class DiscoveryService:
             hasattr(ds, 'ContrastBolusRoute'),
             'contrast' in getattr(ds, 'StudyDescription', '').lower(),
             'contrast' in getattr(ds, 'SeriesDescription', '').lower(),
+            'contraste' in getattr(ds, 'StudyDescription', '').lower(),
             'c+' in getattr(ds, 'SeriesDescription', '').lower(),
             'angiotc' in getattr(ds, 'StudyDescription', '').lower(),
             'angio' in getattr(ds, 'SeriesDescription', '').lower(),
@@ -249,7 +250,7 @@ class DiscoveryService:
         }
         
         # Keywords para TORAX/TEP (Body Part)
-        THORAX_BODY_PARTS = {'THORAX', 'TORAX', 'CHEST', 'LUNG', 'PULMON', 'PECHO'}
+        THORAX_BODY_PARTS = {'THORAX', 'TORAX', 'TORSO', 'CHEST', 'LUNG', 'PULMON', 'PECHO'}
         # Keywords para CEREBRO (Body Part)
         BRAIN_BODY_PARTS = {'HEAD', 'BRAIN', 'SKULL', 'CRANIUM', 'CABEZA', 'CEREBRO', 'CRANEO'}
         
@@ -286,7 +287,7 @@ class DiscoveryService:
             'pulmonar', 'pulmonary', 'embol', 'tromboembol',
             'arteria pulmon', 'pulmonary arter', 'pe protocol',
             'torax', 'thorax', 'chest', 'toracic', 'thoracic',
-            'pecho', 'lung', 'pulmon'
+            'pecho', 'lung', 'pulmon', 'torso'
         ]
         
         # Keywords para CEREBRO (fuzzy match)

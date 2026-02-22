@@ -185,6 +185,7 @@ class StudyViewSet(viewsets.ModelViewSet):
     def _run_pipeline(self, study_id):
         from django.db import connection
         from .services.discovery_service import DiscoveryService
+        import shutil
         
         try:
             study = Study.objects.get(id=study_id)
@@ -198,6 +199,22 @@ class StudyViewSet(viewsets.ModelViewSet):
                     metadata=metadata
                 )
                 print(f"[{level}] [{stage}] {msg}")
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # FRESH RE-EXTRACTION: Prevents stale DICOM contamination
+            # ═══════════════════════════════════════════════════════════════════
+            if study.dicom_archive:
+                extract_path = os.path.join(settings.MEDIA_ROOT, 'extracted', str(study.id))
+                # Wipe any old extraction
+                if os.path.exists(extract_path):
+                    shutil.rmtree(extract_path)
+                os.makedirs(extract_path, exist_ok=True)
+                
+                dicom_service = DicomService()
+                dicom_service.extract_zip(study.dicom_archive.path, extract_path)
+                study.dicom_directory = extract_path
+                study.save(update_fields=['dicom_directory'])
+                log(f"Fresh DICOM extraction: {extract_path}", stage='INGESTION')
 
             # If AUTO modality, run discovery service first
             effective_modality = study.modality
