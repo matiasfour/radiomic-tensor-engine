@@ -1238,12 +1238,12 @@ class StudyViewSet(viewsets.ModelViewSet):
             'entropy_map': 'entropy_map',
             'mk': 'mk_map',
             'mk_map': 'mk_map',
-            'fa': 'fa_map',
             'fa_map': 'fa_map',
             'md': 'md_map',
             'md_map': 'md_map',
             'coherence_map': 'tep_coherence_map', # Phase 7
             'tep_coherence_map': 'tep_coherence_map', # Phase 7
+            'gt_mask': 'gt_mask', # Clinical Validation GT
         }
         
         field_name = map_fields.get(map_type)
