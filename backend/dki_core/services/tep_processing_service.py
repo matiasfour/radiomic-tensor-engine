@@ -1844,28 +1844,42 @@ class TEPProcessingService:
         if log_callback:
             log_callback(f"   🔍 [DIAG] hodge={hodge_score.shape}({hodge_score.ndim}D) ricci={ricci_score.shape}({ricci_score.ndim}D) v_map={v_map.shape}({v_map.ndim}D)")
 
-        # ════════════════════════════════════════════════════════════════════
-        # [FIX] Volume-Preserving Defect Detection (Impossible Condition Fix)
-        # ════════════════════════════════════════════════════════════════════
+        # 1. Expand PA bounds and Create Lung Proximity Mask
         from scipy.ndimage import gaussian_laplace
         
-        # 1. Expand PA bounds to encapsulate the "dark holes" (thrombi)
-        # pa_mask is >220 HU (bright contrast), but thrombi are 30-100 HU.
-        # We must dilate the vessel to capture the dark clot inside it.
         struct_3d = generate_binary_structure(3, 1)
+        # Dilate PA contrast to catch emboli
         pa_dilated = binary_dilation(pa_mask, structure=struct_3d, iterations=3)
         
-        # 2. Base Density Mask (Constrained to dilated PA)
-        defect_mask = (data >= 30) & (data <= 100) & pa_dilated
+        # NEW: Lung Proximity Shield (Fast Slice-by-Slice)
+        # Emboli happen in/near the lungs. The heart wall is too far from aerated lung.
+        lung_proximity = np.zeros_like(data, dtype=bool)
+        for z in range(data.shape[0]):
+            lung_core = data[z] < -400  # Aerated lung tissue
+            # Dilate ~15 pixels (approx 10-15mm) to cover hilar vessels but exclude anterior heart
+            lung_proximity[z] = binary_dilation(lung_core, iterations=15)
         
-        # 3. Anatomical Exclusions
-        bone_mask = binary_dilation(data > 400, iterations=4)
-        lung_exclusion = binary_dilation(data < -400, iterations=2)
+        # 2. Base Density Mask (Constrained to dilated PA AND Lung Proximity)
+        defect_mask = (data >= 30) & (data <= 100) & pa_dilated & lung_proximity
+        
+        # 3 & 4. Anatomical Exclusions & Edge Removal (FAST SLICE-BY-SLICE)
+        bone_mask = np.zeros_like(data, dtype=bool)
+        lung_exclusion = np.zeros_like(data, dtype=bool)
+        edges = np.zeros_like(data, dtype=np.float32)
+        
+        # Process slice by slice to avoid 3D convolution CPU hangs
+        for z in range(data.shape[0]):
+            slice_data = data[z]
+            
+            # Fast 2D dilations
+            bone_mask[z] = binary_dilation(slice_data > 400, iterations=4)
+            lung_exclusion[z] = binary_dilation(slice_data < -400, iterations=2)
+            
+            # Fast 2D Laplacian
+            edges[z] = gaussian_laplace(slice_data.astype(np.float32), sigma=1.0)
+            
         defect_mask[bone_mask] = False
         defect_mask[lung_exclusion] = False
-        
-        # 4. Edge Artifact Removal
-        edges = gaussian_laplace(data.astype(np.float32), sigma=1.0)
         defect_mask[edges > 80] = False
         
         # 5. Morphological Cleanup (NO EROSION)
