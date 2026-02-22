@@ -126,6 +126,16 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 		loading: false,
 	});
 
+	// Ground Truth Bundle (optional - loaded only when .mat annotation available)
+	const [gtBundle, setGtBundle] = useState<SliceBundle>({
+		slices: [],
+		total_slices: 0,
+		loaded: false,
+		loading: false,
+	});
+	const [showGT, setShowGT] = useState(false);
+	const gtCanvasRef = useRef<HTMLCanvasElement>(null);
+
 	const [showROI, setShowROI] = useState(false);
 	const [showPins, setShowPins] = useState(true);
 	const [showFindingsIndex, setShowFindingsIndex] = useState(false);
@@ -382,7 +392,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 					loading: false,
 					error: err instanceof Error ? err.message : "Error loading coherence",
 				}));
-			}
+				}
 		};
 
 		loadCoherenceBundle();
@@ -393,6 +403,36 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 		coherenceBundle.loading,
 		coherenceBundle.loaded,
 	]);
+
+	// Load GT bundle (on-demand, triggered by toggle button click)
+	const loadGTBundle = async () => {
+		setGtBundle(prev => ({ ...prev, loading: true }));
+
+		try {
+			const url = `${baseUrl}/api/studies/${studyId}/result-bundle/gt_mask/?max_size=512`;
+
+			const response = await fetch(url);
+			if (!response.ok) {
+				throw new Error(`Error loading GT mask: ${response.status}`);
+			}
+
+			const data = await response.json();
+
+			setGtBundle({
+				slices: data.slices,
+				total_slices: data.total_slices,
+				loaded: true,
+				loading: false,
+			});
+		} catch (err) {
+			console.error("Error loading GT bundle:", err);
+			setGtBundle(prev => ({
+				...prev,
+				loading: false,
+				error: err instanceof Error ? err.message : "Error loading GT mask",
+			}));
+		}
+	};
 
 	// Build available maps based on modality and results
 	const getAvailableMaps = useCallback((): MapConfig[] => {
@@ -914,6 +954,67 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 			img.src = roiUrl;
 		}
 	}, [viewerState.currentSlice, showROI, roiBundle]);
+
+	// Render GT panel canvas (source + red GT mask overlay)
+	useEffect(() => {
+		const gtCanvas = gtCanvasRef.current;
+		if (!gtCanvas || !showGT || !gtBundle.loaded || !sourceBundles.loaded) return;
+
+		const ctx = gtCanvas.getContext("2d");
+		if (!ctx) return;
+
+		const sliceIdx = Math.min(viewerState.currentSlice, sourceBundles.total_slices - 1);
+		const sourceUrl = sourceBundles.slices[sliceIdx];
+		const gtIdx = Math.min(viewerState.currentSlice, gtBundle.total_slices - 1);
+		const gtUrl = gtBundle.slices[gtIdx];
+
+		if (sourceUrl) {
+			const sourceImg = new Image();
+			sourceImg.onload = () => {
+				gtCanvas.width = sourceImg.width;
+				gtCanvas.height = sourceImg.height;
+				
+				// Draw source CT slice as background
+				ctx.drawImage(sourceImg, 0, 0);
+
+				// Overlay GT mask in semi-transparent red
+				if (gtUrl) {
+					const gtImg = new Image();
+					gtImg.onload = () => {
+						// Create a temporary canvas for the red tint
+						const tempCanvas = document.createElement("canvas");
+						tempCanvas.width = gtCanvas.width;
+						tempCanvas.height = gtCanvas.height;
+						const tempCtx = tempCanvas.getContext("2d");
+						if (!tempCtx) return;
+
+						// Draw GT mask
+						tempCtx.drawImage(gtImg, 0, 0, gtCanvas.width, gtCanvas.height);
+
+						// Tint: get image data and make non-black pixels red
+						const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+						const data = imageData.data;
+						for (let i = 0; i < data.length; i += 4) {
+							if (data[i] > 10 || data[i + 1] > 10 || data[i + 2] > 10) {
+								data[i] = 255;     // R
+								data[i + 1] = 0;   // G 
+								data[i + 2] = 0;    // B
+								data[i + 3] = 140;  // Alpha ~55%
+							} else {
+								data[i + 3] = 0; // Fully transparent for background
+							}
+						}
+						tempCtx.putImageData(imageData, 0, 0);
+
+						// Composite the red mask over the source
+						ctx.drawImage(tempCanvas, 0, 0);
+					};
+					gtImg.src = gtUrl;
+				}
+			};
+			sourceImg.src = sourceUrl;
+		}
+	}, [viewerState.currentSlice, showGT, gtBundle, sourceBundles]);
 
 	// Initialize Niivue when 3D tab is active
 	useEffect(() => {
@@ -1573,6 +1674,30 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 						/>
 						ROI
 					</label>
+					{/* Ground Truth Toggle (only shown when GT data available) */}
+					{results?.gt_mask && (
+						<button
+							onClick={() => {
+								if (!gtBundle.loaded && !gtBundle.loading) {
+									loadGTBundle();
+								}
+								setShowGT(prev => !prev);
+							}}
+							style={{
+								padding: "4px 10px",
+								background: showGT ? "rgba(239, 68, 68, 0.3)" : "rgba(239, 68, 68, 0.1)",
+								border: showGT ? "1px solid #ef4444" : "1px solid rgba(239, 68, 68, 0.3)",
+								borderRadius: "4px",
+								color: showGT ? "#ef4444" : "#f87171",
+								cursor: "pointer",
+								fontSize: "0.75rem",
+								fontWeight: showGT ? "bold" : "normal",
+								transition: "all 0.2s",
+							}}
+						>
+							🎯 {showGT ? "Ocultar GT" : "Comparar con Experto"}
+						</button>
+					)}
 				</div>
 
 				{/* Legend for Pseudocolor */}
@@ -1881,8 +2006,32 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 					</div>
 				</div>
 			) : (
-				/* Image Viewer Container */
-				<div className="viewer-container" onWheel={handleWheel}>
+				<>
+				{/* Image Viewer Container — Split when GT active */}
+				<div style={showGT && gtBundle.loaded ? {
+					display: "grid",
+					gridTemplateColumns: "1fr 1fr",
+					gap: "4px",
+					width: "100%",
+					height: "100%",
+				} : {}}>
+				{/* MART Viewer (Left or Full) */}
+				<div className="viewer-container" onWheel={handleWheel} style={showGT && gtBundle.loaded ? { position: "relative" } : {}}>
+					{showGT && gtBundle.loaded && (
+						<div style={{
+							position: "absolute",
+							top: "8px",
+							left: "8px",
+							background: "rgba(59, 130, 246, 0.8)",
+							color: "white",
+							padding: "2px 8px",
+							borderRadius: "4px",
+							fontSize: "0.7rem",
+							fontWeight: "bold",
+							zIndex: 50,
+							letterSpacing: "0.05em",
+						}}>MART (Algoritmo)</div>
+					)}
 					{/* Canvas Wrapper for Zoom/Pan and Alignment */}
 					<div 
 						style={{ 
@@ -1986,10 +2135,83 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 									))}
 							</div>
 						)}
-					</div>					
-					
-					{/* Pin Tooltip (Magnified) */}
-					{activePin && pinTooltipPos && (
+					</div>
+				{/* End MART Viewer */}
+				</div>
+
+				{/* Ground Truth Viewer (Right Panel — only when GT active) */}
+				{showGT && gtBundle.loaded && (
+					<div 
+						className="viewer-container" 
+						onWheel={handleWheel}
+						style={{ position: "relative" }}
+					>
+						{/* GT Label */}
+						<div style={{
+							position: "absolute",
+							top: "8px",
+							left: "8px",
+							background: "rgba(239, 68, 68, 0.8)",
+							color: "white",
+							padding: "2px 8px",
+							borderRadius: "4px",
+							fontSize: "0.7rem",
+							fontWeight: "bold",
+							zIndex: 50,
+							letterSpacing: "0.05em",
+						}}>EXPERTO (Ground Truth)</div>
+
+						{/* GT Source + Red Mask Overlay Canvas */}
+						<div style={{
+							position: "relative",
+							width: "fit-content",
+							height: "fit-content",
+							transform: `scale(${viewerState.zoom})`,
+							transformOrigin: "center center",
+							transition: "transform 0.1s ease-out"
+						}}>
+							<canvas
+								ref={gtCanvasRef}
+								className="viewer-canvas"
+								style={{ display: "block" }}
+							/>
+						</div>
+
+						{/* GT Validation Stats */}
+						{results?.gt_validation && (
+							<div style={{
+								position: "absolute",
+								bottom: "8px",
+								left: "8px",
+								right: "8px",
+								background: "rgba(15, 23, 42, 0.9)",
+								border: "1px solid #334155",
+								borderRadius: "6px",
+								padding: "6px 10px",
+								fontSize: "0.65rem",
+								color: "#94a3b8",
+								zIndex: 50,
+								display: "grid",
+								gridTemplateColumns: "1fr 1fr",
+								gap: "2px 12px",
+							}}>
+								<div>Sensibilidad: <span style={{ color: results.gt_validation.sensitivity >= 0.9 ? "#22c55e" : "#f59e0b", fontWeight: "bold" }}>{(results.gt_validation.sensitivity * 100).toFixed(1)}%</span></div>
+								<div>Dice: <span style={{ color: "#60a5fa", fontWeight: "bold" }}>{results.gt_validation.dice.toFixed(3)}</span></div>
+								<div>Vol. Experto: {results.gt_validation.gt_volume_cm3.toFixed(2)} cm³</div>
+								<div>Vol. MART: {results.gt_validation.mart_volume_cm3.toFixed(2)} cm³</div>
+								<div style={{ color: results.gt_validation.missed_gt_volume_cm3 > 0 ? "#ef4444" : "#22c55e", gridColumn: "1 / -1" }}>
+									{results.gt_validation.missed_gt_volume_cm3 > 0 
+										? `⚠️ Omitido: ${results.gt_validation.missed_gt_volume_cm3.toFixed(2)} cm³`
+										: "✅ 100% detectado"}
+								</div>
+							</div>
+						)}
+					</div>
+				)}
+				</div> {/* End split-screen wrapper */}
+				
+				{/* Pin Tooltip (Magnified) */}
+				{activePin && pinTooltipPos && (
 						<div
 							style={{
 								position: "fixed",
@@ -2323,7 +2545,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 							Cargando mapa de calor...
 						</div>
 					)}
-				</div>
+				</>
 			)}
 			
 			{/* ══════════════════════════════════════════════════════════════════════ */}

@@ -215,6 +215,10 @@ class TEPAuditReportService:
             if 'coherence_map' in self.results:
                 self._add_vascular_coherence_page(pdf)
             
+            # PAGE 6: Ground Truth Validation (optional - only if .mat annotation was available)
+            if self.results.get('gt_validation'):
+                self._add_ground_truth_validation_page(pdf)
+            
             # PAGE N: Clinical Recommendations
             self._add_clinical_recommendations_page(pdf)
             
@@ -675,6 +679,131 @@ Uncertainty Sigma: {self.results.get('uncertainty_sigma', 0):.4f}
 
         pdf.savefig(fig, bbox_inches='tight')
         plt.close()
+
+    def _add_ground_truth_validation_page(self, pdf):
+        """Add Ground Truth validation page comparing MART vs expert annotations."""
+        gt = self.results.get('gt_validation', {})
+        if not gt:
+            return
+        
+        fig = plt.figure(figsize=(11, 8.5))
+        fig.suptitle('VALIDACIÓN CLÍNICA (GROUND TRUTH)', fontsize=16, fontweight='bold', color='#1a1a2e')
+        
+        # Use gridspec for structured layout
+        gs = gridspec.GridSpec(3, 2, figure=fig, hspace=0.4, wspace=0.3,
+                               top=0.88, bottom=0.08, left=0.08, right=0.92)
+        
+        # ── TOP LEFT: Key Metrics Table ──
+        ax_table = fig.add_subplot(gs[0, 0])
+        ax_table.axis('off')
+        ax_table.set_title('Métricas de Validación', fontsize=11, fontweight='bold', pad=10)
+        
+        sensitivity = gt.get('sensitivity', 0)
+        dice = gt.get('dice', 0)
+        
+        table_data = [
+            ['Sensibilidad (Recall)', f"{sensitivity:.1%}"],
+            ['Coeficiente Dice', f"{dice:.3f}"],
+            ['Volumen Experto (GT)', f"{gt.get('gt_volume_cm3', 0):.2f} cm³"],
+            ['Volumen MART', f"{gt.get('mart_volume_cm3', 0):.2f} cm³"],
+            ['Intersección', f"{gt.get('intersection_cm3', 0):.2f} cm³"],
+            ['Omitido (FN)', f"{gt.get('missed_gt_volume_cm3', 0):.2f} cm³"],
+            ['Sub-visual (FP)', f"{gt.get('mart_discoveries_cm3', 0):.2f} cm³"],
+        ]
+        
+        table = ax_table.table(
+            cellText=table_data,
+            colLabels=['Métrica', 'Valor'],
+            loc='center',
+            cellLoc='left',
+            colWidths=[0.55, 0.35]
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1, 1.5)
+        
+        # Color code sensitivity
+        for i, row in enumerate(table_data):
+            if i == 0:  # Sensitivity
+                color = '#c8e6c9' if sensitivity >= 0.9 else '#fff3e0' if sensitivity >= 0.7 else '#ffcdd2'
+                table[i + 1, 1].set_facecolor(color)
+            elif i == 5 and gt.get('missed_gt_volume_cm3', 0) > 0:  # Missed
+                table[i + 1, 1].set_facecolor('#ffcdd2')
+        
+        # ── TOP RIGHT: Volume Comparison Bar Chart ──
+        ax_bar = fig.add_subplot(gs[0, 1])
+        categories = ['Experto\n(Ground Truth)', 'MART\n(Algoritmo)', 'Intersección']
+        values = [
+            gt.get('gt_volume_cm3', 0),
+            gt.get('mart_volume_cm3', 0),
+            gt.get('intersection_cm3', 0)
+        ]
+        colors = ['#e53935', '#1565c0', '#7b1fa2']
+        bars = ax_bar.bar(categories, values, color=colors, alpha=0.8, edgecolor='white', linewidth=1.5)
+        ax_bar.set_ylabel('Volumen (cm³)', fontsize=9)
+        ax_bar.set_title('Comparación de Volúmenes', fontsize=11, fontweight='bold')
+        ax_bar.grid(axis='y', alpha=0.3)
+        
+        # Add value labels on bars
+        for bar, val in zip(bars, values):
+            ax_bar.text(bar.get_x() + bar.get_width()/2., bar.get_height() + max(values)*0.02,
+                       f'{val:.2f}', ha='center', va='bottom', fontsize=8, fontweight='bold')
+        
+        # ── MIDDLE: Clinical Assessment ──
+        ax_assess = fig.add_subplot(gs[1, :])
+        ax_assess.axis('off')
+        
+        missed = gt.get('missed_gt_volume_cm3', 0)
+        discoveries = gt.get('mart_discoveries_cm3', 0)
+        
+        if missed > 0:
+            assessment_title = "⚠️  ALERTA: Discrepancia Detectada"
+            assessment_color = '#e53935'
+            assessment_text = (
+                f"MART omitió {missed:.2f} cm³ de trombos marcados por el experto.\n"
+                f"Sensibilidad: {sensitivity:.1%} — "
+                f"{'Se requiere revisión manual del estudio.' if sensitivity < 0.9 else 'La cobertura es aceptable pero no total.'}"
+            )
+        else:
+            assessment_title = "✅  ÉXITO: Concordancia Total"
+            assessment_color = '#2e7d32'
+            assessment_text = (
+                f"MART detectó el 100% de los hallazgos marcados por el experto.\n"
+                f"Coeficiente Dice: {dice:.3f}"
+            )
+        
+        if discoveries > 0:
+            assessment_text += f"\nMART identificó {discoveries:.2f} cm³ adicionales no marcados por el experto (hallazgos sub-visuales)."
+        
+        ax_assess.text(0.5, 0.8, assessment_title, transform=ax_assess.transAxes,
+                      fontsize=14, fontweight='bold', color=assessment_color,
+                      ha='center', va='center')
+        ax_assess.text(0.5, 0.35, assessment_text, transform=ax_assess.transAxes,
+                      fontsize=10, ha='center', va='center',
+                      style='italic', color='#333333',
+                      bbox=dict(boxstyle='round,pad=0.5', facecolor='#f5f5f5', edgecolor='#cccccc'))
+        
+        # ── BOTTOM: Dice Score Gauge ──
+        ax_gauge = fig.add_subplot(gs[2, :])
+        ax_gauge.axis('off')
+        ax_gauge.set_title('Concordancia Espacial (Dice)', fontsize=11, fontweight='bold', pad=10)
+        
+        # Simple horizontal bar gauge for Dice
+        gauge_ax = fig.add_axes([0.15, 0.08, 0.7, 0.06])
+        gauge_ax.barh(0, dice, height=0.4, color='#1565c0' if dice >= 0.7 else '#e53935', alpha=0.8)
+        gauge_ax.barh(0, 1.0, height=0.4, color='#e0e0e0', alpha=0.3)
+        gauge_ax.set_xlim(0, 1)
+        gauge_ax.set_yticks([])
+        gauge_ax.set_xticks([0, 0.25, 0.5, 0.7, 0.85, 1.0])
+        gauge_ax.set_xticklabels(['0', '0.25', '0.50', '0.70\n(Mín)', '0.85\n(Bueno)', '1.0\n(Perfecto)'], fontsize=8)
+        gauge_ax.axvline(x=0.7, color='orange', linestyle='--', linewidth=1, alpha=0.7)
+        gauge_ax.axvline(x=0.85, color='green', linestyle='--', linewidth=1, alpha=0.7)
+        gauge_ax.text(dice, 0.55, f'{dice:.3f}', ha='center', va='bottom', fontsize=10, fontweight='bold',
+                     color='#1565c0' if dice >= 0.7 else '#e53935')
+        
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close()
+
 
     def _add_clinical_recommendations_page(self, pdf):
         """Add clinical recommendations page based on severity."""
