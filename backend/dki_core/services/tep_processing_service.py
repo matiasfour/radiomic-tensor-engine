@@ -520,11 +520,11 @@ class TEPProcessingService:
         # ═══════════════════════════════════════════════════════════════════════════
         if log_callback:
             log_callback("Step 9.8/9: Generating pseudocolor HU map (Phase 6)...")
-        pseudocolor_map = self._generate_pseudocolor_lut(data, domain_mask=(lung_mask | pa_mask))
+        pseudocolor_map = self._generate_pseudocolor_lut(working_data, domain_mask=(lung_mask | pa_mask))
         
         # Expand masks to original size
         pa_mask_full = self._expand_to_original(pa_mask, data.shape, crop_info)
-        pseudocolor_map_full = pseudocolor_map # Already full size since generated from 'data'
+        pseudocolor_map_full = self._expand_to_original(pseudocolor_map, data.shape, crop_info)
         thrombus_mask_full = self._expand_to_original(thrombus_mask, data.shape, crop_info)
         lung_mask_full = self._expand_to_original(lung_mask, data.shape, crop_info)
         heatmap_full = self._expand_to_original(heatmap, (*data.shape, 3), crop_info)
