@@ -17,6 +17,7 @@ except ImportError:
     from skimage.morphology import skeletonize as skeletonize_3d
 import numpy.fft as fft
 import scipy.stats as stats
+import scipy.io as sio
 
 warnings.filterwarnings('ignore')
 
@@ -138,7 +139,8 @@ class TEPProcessingService:
         return array
 
     def process_study(self, data, affine, kvp=None, mas=None, spacing=None, log_callback=None,
-                       domain_mask=None, is_contrast_optimal=None, is_non_contrast=False):
+                       domain_mask=None, is_contrast_optimal=None, is_non_contrast=False,
+                       mat_filepath=None):
         """
         Execute TEP detection pipeline on CT Angiography data.
         
@@ -724,8 +726,190 @@ class TEPProcessingService:
             else:
                 log_callback("  ✅ No significant filling defects detected")
         
+        # ═══════════════════════════════════════════════════════════════════════
+        # GROUND TRUTH VALIDATION (optional - only if .mat file provided)
+        # ═══════════════════════════════════════════════════════════════════════
+        if mat_filepath:
+            try:
+                if log_callback:
+                    log_callback("═══════════════════════════════════════════════════════════")
+                    log_callback("  GROUND TRUTH VALIDATION (Expert Comparison)")
+                    log_callback("═══════════════════════════════════════════════════════════")
+                    log_callback(f"  Loading expert mask: {mat_filepath}")
+                
+                gt_result = self._validate_against_ground_truth(
+                    mart_mask=results['thrombus_mask'],
+                    mat_filepath=mat_filepath,
+                    spacing=spacing,
+                    log_callback=log_callback
+                )
+                
+                if gt_result:
+                    results['gt_mask'] = gt_result['gt_mask']
+                    results['gt_validation'] = {
+                        'gt_volume_cm3': gt_result['gt_volume_cm3'],
+                        'mart_volume_cm3': gt_result['mart_volume_cm3'],
+                        'intersection_cm3': gt_result['intersection_cm3'],
+                        'missed_gt_volume_cm3': gt_result['missed_gt_volume_cm3'],
+                        'mart_discoveries_cm3': gt_result['mart_discoveries_cm3'],
+                        'sensitivity': gt_result['sensitivity'],
+                        'dice': gt_result['dice'],
+                    }
+                    
+                    if log_callback:
+                        v = results['gt_validation']
+                        log_callback(f"  📊 Sensitivity (GT Detected): {v['sensitivity']:.1%}")
+                        log_callback(f"  📐 GT Volume (Expert): {v['gt_volume_cm3']:.2f} cm³")
+                        log_callback(f"  📐 MART Volume: {v['mart_volume_cm3']:.2f} cm³")
+                        log_callback(f"  📐 Intersection: {v['intersection_cm3']:.2f} cm³")
+                        log_callback(f"  ❌ Missed by MART: {v['missed_gt_volume_cm3']:.2f} cm³")
+                        log_callback(f"  🔬 Sub-visual (MART only): {v['mart_discoveries_cm3']:.2f} cm³")
+                        log_callback(f"  🎲 Dice Coefficient: {v['dice']:.3f}")
+                        
+                        if v['missed_gt_volume_cm3'] > 0:
+                            log_callback("  ⚠️ ALERTA: MART omitió trombos marcados por el experto.")
+                        else:
+                            log_callback("  ✅ ÉXITO: MART detectó el 100% de los hallazgos del experto.")
+                        
+                        log_callback("═══════════════════════════════════════════════════════════")
+            except Exception as e:
+                if log_callback:
+                    log_callback(f"  ⚠️ Warning: Ground truth validation failed: {str(e)}", level='WARNING')
+        
         return results
     
+    # ═══════════════════════════════════════════════════════════════════════════
+    # GROUND TRUTH VALIDATION
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    def _validate_against_ground_truth(self, mart_mask, mat_filepath, spacing=None, log_callback=None):
+        """
+        Compare MART thrombus detection against expert Ground Truth mask from .mat file.
+        
+        Args:
+            mart_mask: 3D binary numpy array from MART pipeline
+            mat_filepath: Path to .mat file containing expert annotation
+            spacing: Voxel spacing (z, y, x) in mm for volume calculation
+            log_callback: Optional logging function
+            
+        Returns:
+            dict with gt_mask, volume metrics (cm³), sensitivity, dice
+            or None if loading fails
+        """
+        import os
+        
+        if not os.path.exists(mat_filepath):
+            if log_callback:
+                log_callback(f"  ⚠️ MAT file not found: {mat_filepath}")
+            return None
+        
+        # Load .mat file
+        try:
+            mat_data = sio.loadmat(mat_filepath)
+        except Exception as e:
+            if log_callback:
+                log_callback(f"  ⚠️ Error loading MAT file: {str(e)}")
+            return None
+        
+        # Find the 3D mask array — try common keys first, then scan all
+        gt_mask = None
+        priority_keys = ['mask', 'Mask', 'MASK', 'ROI', 'roi', 'Roi', 
+                         'segmentation', 'Segmentation', 'label', 'Label']
+        
+        for key in priority_keys:
+            if key in mat_data and isinstance(mat_data[key], np.ndarray) and mat_data[key].ndim == 3:
+                gt_mask = mat_data[key].astype(np.float32)
+                if log_callback:
+                    log_callback(f"  ✓ Found GT mask in key '{key}': shape {gt_mask.shape}")
+                break
+        
+        # If not found, scan all keys for the first 3D array
+        if gt_mask is None:
+            for key, value in mat_data.items():
+                if key.startswith('__'):  # Skip metadata keys
+                    continue
+                if isinstance(value, np.ndarray) and value.ndim == 3:
+                    gt_mask = value.astype(np.float32)
+                    if log_callback:
+                        log_callback(f"  ✓ Found GT mask in key '{key}' (auto-detected): shape {gt_mask.shape}")
+                    break
+        
+        if gt_mask is None:
+            if log_callback:
+                log_callback(f"  ⚠️ No 3D array found in MAT file. Keys: {[k for k in mat_data if not k.startswith('__')]}")
+            return None
+        
+        # Binarize GT mask (ensure 0/1)
+        gt_mask = (gt_mask > 0).astype(np.uint8)
+        
+        # Handle shape mismatch between GT and MART masks
+        mart_shape = mart_mask.shape
+        gt_shape = gt_mask.shape
+        
+        if gt_shape != mart_shape:
+            if log_callback:
+                log_callback(f"  ⚠️ Shape mismatch: GT {gt_shape} vs MART {mart_shape}. Aligning...")
+            
+            # Try transposing if dimensions match but order differs
+            if sorted(gt_shape) == sorted(mart_shape):
+                # Find permutation that matches
+                for perm in [(0,1,2), (0,2,1), (1,0,2), (1,2,0), (2,0,1), (2,1,0)]:
+                    if tuple(gt_shape[p] for p in perm) == mart_shape:
+                        gt_mask = np.transpose(gt_mask, perm)
+                        if log_callback:
+                            log_callback(f"  ✓ Transposed GT mask with permutation {perm}")
+                        break
+            
+            # If still mismatched, pad or crop
+            if gt_mask.shape != mart_shape:
+                aligned = np.zeros(mart_shape, dtype=np.uint8)
+                # Copy overlapping region
+                min_z = min(gt_mask.shape[0], mart_shape[0])
+                min_y = min(gt_mask.shape[1], mart_shape[1])
+                min_x = min(gt_mask.shape[2], mart_shape[2])
+                aligned[:min_z, :min_y, :min_x] = gt_mask[:min_z, :min_y, :min_x]
+                gt_mask = aligned
+                if log_callback:
+                    log_callback(f"  ✓ Aligned GT mask to {mart_shape} (copied {min_z}×{min_y}×{min_x} overlap)")
+        
+        # Compute metrics
+        mart_binary = (mart_mask > 0).astype(np.uint8)
+        
+        gt_voxels = int(np.sum(gt_mask))
+        mart_voxels = int(np.sum(mart_binary))
+        intersection_voxels = int(np.sum(gt_mask & mart_binary))
+        missed_voxels = int(np.sum(gt_mask & ~mart_binary))  # FN: in GT but not in MART
+        discovery_voxels = int(np.sum(~gt_mask & mart_binary))  # FP: in MART but not in GT
+        
+        # Volume conversion
+        if spacing is not None:
+            voxel_vol_cm3 = np.prod(spacing) / 1000.0
+        else:
+            voxel_vol_cm3 = 1.0  # Fallback: raw voxel count
+        
+        gt_volume_cm3 = gt_voxels * voxel_vol_cm3
+        mart_volume_cm3 = mart_voxels * voxel_vol_cm3
+        intersection_cm3 = intersection_voxels * voxel_vol_cm3
+        missed_cm3 = missed_voxels * voxel_vol_cm3
+        discovery_cm3 = discovery_voxels * voxel_vol_cm3
+        
+        # Sensitivity (Recall) = TP / (TP + FN)
+        sensitivity = intersection_voxels / gt_voxels if gt_voxels > 0 else 1.0
+        
+        # Dice coefficient = 2 * |A ∩ B| / (|A| + |B|)
+        dice = (2.0 * intersection_voxels) / (gt_voxels + mart_voxels) if (gt_voxels + mart_voxels) > 0 else 0.0
+        
+        return {
+            'gt_mask': gt_mask,
+            'gt_volume_cm3': float(gt_volume_cm3),
+            'mart_volume_cm3': float(mart_volume_cm3),
+            'intersection_cm3': float(intersection_cm3),
+            'missed_gt_volume_cm3': float(missed_cm3),
+            'mart_discoveries_cm3': float(discovery_cm3),
+            'sensitivity': float(sensitivity),
+            'dice': float(dice),
+        }
+
     # ═══════════════════════════════════════════════════════════════════════════
     # Phase 8: Advanced VOI Analysis & Hemodynamics (MART v3)
     # ═══════════════════════════════════════════════════════════════════════════

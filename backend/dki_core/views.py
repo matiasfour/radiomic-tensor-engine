@@ -685,6 +685,23 @@ class StudyViewSet(viewsets.ModelViewSet):
         
         # Process with TEP service, passing domain mask for anatomical constraint
         processor = TEPProcessingService()
+        
+        # Construct .mat ground truth path (optional - for clinical validation)
+        mat_filepath = None
+        if study.dicom_archive and study.dicom_archive.name:
+            import re
+            zip_basename = os.path.basename(study.dicom_archive.name)
+            # Extract folder name: "imported_PAT019.zip" → "PAT019", "imported_PAT019_abc123.zip" → "PAT019"
+            match = re.match(r'imported_(.+?)(?:_[A-Za-z0-9]{6,8})?\.zip$', zip_basename)
+            if match:
+                folder_name = match.group(1)
+                mat_path = os.path.join(str(settings.DEFAULT_IMPORT_DIR), 'mat', f'{folder_name}.mat')
+                if os.path.exists(mat_path):
+                    mat_filepath = mat_path
+                    log(f"Ground truth file found: {mat_path}", stage='SEGMENTATION')
+                else:
+                    log(f"No ground truth file at: {mat_path} (skipping GT validation)", stage='SEGMENTATION', level='DEBUG')
+        
         results = processor.process_study(
             data, 
             affine, 
@@ -693,7 +710,8 @@ class StudyViewSet(viewsets.ModelViewSet):
             spacing=metadata.get('spacing'),
             log_callback=log,
             domain_mask=domain_mask,
-            is_contrast_optimal=is_contrast_optimal
+            is_contrast_optimal=is_contrast_optimal,
+            mat_filepath=mat_filepath
         )
         
         log("TEP segmentation and analysis completed", stage='SEGMENTATION', metadata={
@@ -777,6 +795,12 @@ class StudyViewSet(viewsets.ModelViewSet):
         # UX Metadata (Diagnostic Station)
         result.slices_meta = results.get('slices_meta')
         result.findings_pins = results.get('findings_pins')
+        
+        # Ground Truth Validation (optional)
+        if results.get('gt_mask') is not None:
+            result.gt_mask.name = save_nifti(results['gt_mask'], 'gt_mask', affine)
+            result.gt_validation = results.get('gt_validation')
+            log("Ground truth mask and validation metrics saved", stage='OUTPUT', metadata=results.get('gt_validation'))
         
         # Generate Audit Report PDF
         log("Generating audit report PDF...", stage='OUTPUT')

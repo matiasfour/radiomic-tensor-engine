@@ -274,6 +274,18 @@ export interface ProcessingResult {
 
 	// Audit Report PDF
 	audit_report?: string;
+
+	// Ground Truth Validation (optional - from .mat expert annotations)
+	gt_mask?: string;
+	gt_validation?: {
+		gt_volume_cm3: number;
+		mart_volume_cm3: number;
+		intersection_cm3: number;
+		missed_gt_volume_cm3: number;
+		mart_discoveries_cm3: number;
+		sensitivity: number;
+		dice: number;
+	};
 }
 
 export interface SlicesMeta {

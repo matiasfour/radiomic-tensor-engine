@@ -127,6 +127,10 @@ class ProcessingResult(models.Model):
     # Audit Report (PDF)
     audit_report = models.FileField(upload_to='results/audit_reports/', blank=True, null=True)
     
+    # Ground Truth Validation (optional - from .mat expert annotations)
+    gt_mask = models.FileField(upload_to='results/gt_mask/', blank=True, null=True, help_text="Expert ground truth mask as NIfTI")
+    gt_validation = models.JSONField(blank=True, null=True, help_text="GT vs MART comparison metrics (sensitivity, dice, volumes)")
+    
     class Meta:
         db_table = 'dki_core_processingresult'
         
