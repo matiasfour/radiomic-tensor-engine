@@ -2100,7 +2100,6 @@ class TEPProcessingService:
         from scipy.ndimage import label as scipy_label
         from scipy.ndimage import mean as ndi_mean
         from scipy.ndimage import sum as ndi_sum
-        from scipy.ndimage import binary_dilation
         
         labeled_defects, num_defects = scipy_label(defect_mask)
         candidates = np.zeros_like(defect_mask, dtype=bool)
