@@ -1845,41 +1845,44 @@ class TEPProcessingService:
             log_callback(f"   🔍 [DIAG] hodge={hodge_score.shape}({hodge_score.ndim}D) ricci={ricci_score.shape}({ricci_score.ndim}D) v_map={v_map.shape}({v_map.ndim}D)")
 
         # ════════════════════════════════════════════════════════════════════
-        # [FIX] Volume-Preserving Defect Detection (Vesselness Paradox Fix)
+        # [FIX] Volume-Preserving Defect Detection (Impossible Condition Fix)
         # ════════════════════════════════════════════════════════════════════
         from scipy.ndimage import gaussian_laplace
         
-        # 1. Base Density Mask (Fresh clot usually 30-100 HU)
-        defect_mask = (data >= 30) & (data <= 100) & pa_mask
+        # 1. Expand PA bounds to encapsulate the "dark holes" (thrombi)
+        # pa_mask is >220 HU (bright contrast), but thrombi are 30-100 HU.
+        # We must dilate the vessel to capture the dark clot inside it.
+        struct_3d = generate_binary_structure(3, 1)
+        pa_dilated = binary_dilation(pa_mask, structure=struct_3d, iterations=3)
         
-        # 2. Anatomical Exclusions (Bone and Air)
+        # 2. Base Density Mask (Constrained to dilated PA)
+        defect_mask = (data >= 30) & (data <= 100) & pa_dilated
+        
+        # 3. Anatomical Exclusions
         bone_mask = binary_dilation(data > 400, iterations=4)
         lung_exclusion = binary_dilation(data < -400, iterations=2)
         defect_mask[bone_mask] = False
         defect_mask[lung_exclusion] = False
         
-        # 3. [FIX] Remove Vesselness restriction.
-        # Large occlusive clots have low vesselness at their core!
-        # DO NOT apply: defect_mask[roi_vesselness < 0.1] = False
-        
-        # 4. Edge Artifact Removal (Gentle)
+        # 4. Edge Artifact Removal
         edges = gaussian_laplace(data.astype(np.float32), sigma=1.0)
-        defect_mask[edges > 80] = False  # Relaxed from 50 to preserve borders
+        defect_mask[edges > 80] = False
         
-        # 5. [FIX] Morphological Cleanup: DO NOT ERODE!
-        # Use closing to fill internal gaps and make the clot solid
+        # 5. Morphological Cleanup (NO EROSION)
         defect_mask = binary_closing(defect_mask, iterations=1)
         defect_mask = binary_fill_holes(defect_mask)
         defect_mask = remove_small_objects(defect_mask, min_size=5)
         
-        # 6. Build Score Map (Additive System)
+        # 6. Build Score Map (STRICTLY CONSTRAINED TO DEFECT MASK)
         score_map = np.zeros(data.shape, dtype=np.float32)
         score_map[defect_mask] += 1.0  # Base density
-        score_map[v_map > 0.2] += 1.0  # Boost if it is a partial occlusion
-        score_map[coherence_map < 0.5] += 1.0  # Boost for flow interruption
-        score_map[(data >= 40) & (data <= 80)] += 0.5  # Perfect core density bonus
         
-        # [RESTORED] Visual Noise Filter: Zero out regions with extreme topology gradients (artifacts)
+        # Only award bonus points IF the pixel is already a candidate defect
+        score_map[(v_map > 0.2) & defect_mask] += 1.0
+        score_map[(coherence_map < 0.5) & defect_mask] += 1.0
+        score_map[(data >= 40) & (data <= 80) & defect_mask] += 0.5
+        
+        # Visual Noise Filter
         noise_mask = (hodge_score > 300) | (np.abs(ricci_score) > 5.0)
         voxels_blocked = int(np.sum(score_map[noise_mask] > 0))
         score_map[noise_mask] = 0
@@ -1888,8 +1891,6 @@ class TEPProcessingService:
             log_callback(f"   🛡️ Visual Noise Filter blocked {voxels_blocked:,} artifact voxels")
         
         # 7. Candidate Extraction
-        # Define clot shape strictly by the physical defect_mask,
-        # but only keep structures that reached a suspicion threshold.
         candidates = defect_mask & (score_map >= 1.5)
         
         if log_callback:
@@ -2079,8 +2080,8 @@ class TEPProcessingService:
                 'hodge_max': float(np.max(hodge_score)),
                 'ricci_max': float(np.max(ricci_score))
             },
-            'definite_mask': score_map >= self.SCORE_THRESHOLD_DEFINITE,
-            'suspicious_mask': score_map >= self.SCORE_THRESHOLD_SUSPICIOUS,
+            'definite_mask': (score_map >= self.SCORE_THRESHOLD_DEFINITE) & thresholded_mask,
+            'suspicious_mask': (score_map >= self.SCORE_THRESHOLD_SUSPICIOUS) & thresholded_mask,
             'is_tubular_mask': v_map > 0
         }
 
