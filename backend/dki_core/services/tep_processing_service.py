@@ -520,7 +520,7 @@ class TEPProcessingService:
         # ═══════════════════════════════════════════════════════════════════════════
         if log_callback:
             log_callback("Step 9.8/9: Generating pseudocolor HU map (Phase 6)...")
-        pseudocolor_map = self._generate_pseudocolor_lut(data)
+        pseudocolor_map = self._generate_pseudocolor_lut(data, domain_mask=(lung_mask | pa_mask))
         
         # Expand masks to original size
         pa_mask_full = self._expand_to_original(pa_mask, data.shape, crop_info)
@@ -1844,15 +1844,40 @@ class TEPProcessingService:
         if log_callback:
             log_callback(f"   🔍 [DIAG] hodge={hodge_score.shape}({hodge_score.ndim}D) ricci={ricci_score.shape}({ricci_score.ndim}D) v_map={v_map.shape}({v_map.ndim}D)")
 
-        # 1.5 Scoring logic
-        score_map = np.zeros_like(data, dtype=np.float32)
-        score_map[(data >= self.THROMBUS_RANGE[0]) & (data <= self.THROMBUS_RANGE[1]) & pa_mask] += 0.5 
-        score_map[(mk_map > self.MK_THROMBUS_THRESHOLD) & pa_mask] += 1.0
-        score_map[(fac_map < self.FAC_THROMBUS_THRESHOLD) & pa_mask] += 1.0
-        score_map[(coherence_map < 0.4) & pa_mask] += 1.5
+        # ════════════════════════════════════════════════════════════════════
+        # [FIX] Volume-Preserving Defect Detection (Vesselness Paradox Fix)
+        # ════════════════════════════════════════════════════════════════════
+        from scipy.ndimage import gaussian_laplace
         
-        # Apply Vesselness Boost (Tubular structures get +1.0)
-        score_map[v_map > 0] += 1.0
+        # 1. Base Density Mask (Fresh clot usually 30-100 HU)
+        defect_mask = (data >= 30) & (data <= 100) & pa_mask
+        
+        # 2. Anatomical Exclusions (Bone and Air)
+        bone_mask = binary_dilation(data > 400, iterations=4)
+        lung_exclusion = binary_dilation(data < -400, iterations=2)
+        defect_mask[bone_mask] = False
+        defect_mask[lung_exclusion] = False
+        
+        # 3. [FIX] Remove Vesselness restriction.
+        # Large occlusive clots have low vesselness at their core!
+        # DO NOT apply: defect_mask[roi_vesselness < 0.1] = False
+        
+        # 4. Edge Artifact Removal (Gentle)
+        edges = gaussian_laplace(data.astype(np.float32), sigma=1.0)
+        defect_mask[edges > 80] = False  # Relaxed from 50 to preserve borders
+        
+        # 5. [FIX] Morphological Cleanup: DO NOT ERODE!
+        # Use closing to fill internal gaps and make the clot solid
+        defect_mask = binary_closing(defect_mask, iterations=1)
+        defect_mask = binary_fill_holes(defect_mask)
+        defect_mask = remove_small_objects(defect_mask, min_size=5)
+        
+        # 6. Build Score Map (Additive System)
+        score_map = np.zeros(data.shape, dtype=np.float32)
+        score_map[defect_mask] += 1.0  # Base density
+        score_map[v_map > 0.2] += 1.0  # Boost if it is a partial occlusion
+        score_map[coherence_map < 0.5] += 1.0  # Boost for flow interruption
+        score_map[(data >= 40) & (data <= 80)] += 0.5  # Perfect core density bonus
         
         # [RESTORED] Visual Noise Filter: Zero out regions with extreme topology gradients (artifacts)
         noise_mask = (hodge_score > 300) | (np.abs(ricci_score) > 5.0)
@@ -1862,8 +1887,10 @@ class TEPProcessingService:
         if log_callback and voxels_blocked > 0:
             log_callback(f"   🛡️ Visual Noise Filter blocked {voxels_blocked:,} artifact voxels")
         
-        threshold = 2.5 if is_non_contrast else 3.0
-        candidates = score_map >= threshold
+        # 7. Candidate Extraction
+        # Define clot shape strictly by the physical defect_mask,
+        # but only keep structures that reached a suspicion threshold.
+        candidates = defect_mask & (score_map >= 1.5)
         
         if log_callback:
             log_callback(f"   🔍 [DIAG] score_map={score_map.shape}({score_map.ndim}D) candidates={candidates.shape}({candidates.ndim}D) sum={int(np.sum(candidates))}")
@@ -3089,33 +3116,24 @@ class TEPProcessingService:
     # ═══════════════════════════════════════════════════════════════════════════
     # NEW: Pseudocolor LUT Generation (Phase 6)
     # ═══════════════════════════════════════════════════════════════════════════
-    def _generate_pseudocolor_lut(self, data: np.ndarray) -> np.ndarray:
-        """
-        Generate a discrete label map (uint8) based on clinical HU ranges.
-        
-        Ranges:
-        - Label 1 (Air/Lung):       -1000 to -400 HU
-        - Label 2 (Soft Tissue):    -100 to 30 HU
-        - Label 3 (Suspect Thrombus): 30 to 100 HU
-        - Label 4 (Contrast Blood):   150 to 500 HU
-        - Label 5 (Bone/Calc):        > 500 HU
-        
-        Returns:
-            pseudocolor_map: uint8 array with values 0-5.
-        """
+    def _generate_pseudocolor_lut(self, data: np.ndarray, domain_mask: np.ndarray = None) -> np.ndarray:
         lut_map = np.zeros_like(data, dtype=np.uint8)
         
-        # Ranges definition
         # Label 1: Air/Lung (-1000 to -400)
         lut_map[(data >= -1000) & (data < -400)] = 1
         
-        # Label 2: Soft Tissue (-100 to 30) - Muscle, Fat, Organs
+        # Label 2: Soft Tissue (-100 to 30)
         lut_map[(data >= -100) & (data < 30)] = 2
         
-        # Label 3: Suspect Thrombus (30 to 100) - Clot density
-        lut_map[(data >= 30) & (data <= 100)] = 3
+        # Label 3: Suspect Thrombus (30 to 100) - RESTRICTED TO LUNGS/VESSELS
+        thrombus_pixels = (data >= 30) & (data <= 100)
+        # Si le pasamos la máscara anatómica, limpiamos la pared torácica
+        if domain_mask is not None:
+            thrombus_pixels = thrombus_pixels & (domain_mask > 0)
         
-        # Label 4: Contrast Blood (150 to 500) - Enhanced vessels
+        lut_map[thrombus_pixels] = 3
+        
+        # Label 4: Contrast Blood (150 to 500)
         lut_map[(data > 150) & (data <= 500)] = 4
         
         # Label 5: Bone (> 500)
