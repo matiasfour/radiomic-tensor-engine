@@ -2006,32 +2006,24 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 					</div>
 				</div>
 			) : (
-				<>
-				{/* Image Viewer Container — Split when GT active */}
-				<div style={showGT && gtBundle.loaded ? {
-					display: "grid",
-					gridTemplateColumns: "1fr 1fr",
-					gap: "4px",
-					width: "100%",
-					height: "100%",
-				} : {}}>
-				{/* MART Viewer (Left or Full) */}
-				<div className="viewer-container" onWheel={handleWheel} style={showGT && gtBundle.loaded ? { position: "relative" } : {}}>
-					{showGT && gtBundle.loaded && (
-						<div style={{
-							position: "absolute",
-							top: "8px",
-							left: "8px",
-							background: "rgba(59, 130, 246, 0.8)",
-							color: "white",
-							padding: "2px 8px",
-							borderRadius: "4px",
-							fontSize: "0.7rem",
-							fontWeight: "bold",
-							zIndex: 50,
-							letterSpacing: "0.05em",
-						}}>MART (Algoritmo)</div>
-					)}
+				<div className="viewer-container" onWheel={handleWheel}>
+					{/* Flex wrapper: MART canvas + optional GT panel side by side */}
+					<div style={{
+						display: "flex",
+						width: "100%",
+						height: "100%",
+						gap: showGT && gtBundle.loaded ? "4px" : 0,
+						position: "relative",
+					}}>
+					{/* MART Canvas Panel (takes full width normally, 50% when GT active) */}
+					<div style={{
+						position: "relative",
+						flex: showGT && gtBundle.loaded ? "0 0 50%" : "1 1 100%",
+						overflow: "hidden",
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "center",
+					}}>
 					{/* Canvas Wrapper for Zoom/Pan and Alignment */}
 					<div 
 						style={{ 
@@ -2136,79 +2128,80 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 							</div>
 						)}
 					</div>
-				{/* End MART Viewer */}
-				</div>
+					{/* End MART Canvas Panel */}
+					</div>
 
-				{/* Ground Truth Viewer (Right Panel — only when GT active) */}
-				{showGT && gtBundle.loaded && (
-					<div 
-						className="viewer-container" 
-						onWheel={handleWheel}
-						style={{ position: "relative" }}
-					>
-						{/* GT Label */}
-						<div style={{
-							position: "absolute",
-							top: "8px",
-							left: "8px",
-							background: "rgba(239, 68, 68, 0.8)",
-							color: "white",
-							padding: "2px 8px",
-							borderRadius: "4px",
-							fontSize: "0.7rem",
-							fontWeight: "bold",
-							zIndex: 50,
-							letterSpacing: "0.05em",
-						}}>EXPERTO (Ground Truth)</div>
-
-						{/* GT Source + Red Mask Overlay Canvas */}
+					{/* GT Panel (Right side — only when GT active) */}
+					{showGT && gtBundle.loaded && (
 						<div style={{
 							position: "relative",
-							width: "fit-content",
-							height: "fit-content",
-							transform: `scale(${viewerState.zoom})`,
-							transformOrigin: "center center",
-							transition: "transform 0.1s ease-out"
+							flex: "0 0 50%",
+							overflow: "hidden",
+							borderLeft: "2px solid #ef4444",
+							display: "flex",
+							alignItems: "center",
+							justifyContent: "center",
+							background: "#0a0a0a",
 						}}>
+							{/* GT Label */}
+							<div style={{
+								position: "absolute",
+								top: "8px",
+								left: "8px",
+								background: "rgba(239, 68, 68, 0.8)",
+								color: "white",
+								padding: "2px 8px",
+								borderRadius: "4px",
+								fontSize: "0.7rem",
+								fontWeight: "bold",
+								zIndex: 50,
+								letterSpacing: "0.05em",
+							}}>EXPERTO (Ground Truth)</div>
+
+							{/* MART Label (on left panel) */}
+							{/* GT Canvas */}
 							<canvas
 								ref={gtCanvasRef}
 								className="viewer-canvas"
-								style={{ display: "block" }}
+								style={{
+									maxWidth: "100%",
+									maxHeight: "100%",
+									objectFit: "contain",
+								}}
 							/>
-						</div>
 
-						{/* GT Validation Stats */}
-						{results?.gt_validation && (
-							<div style={{
-								position: "absolute",
-								bottom: "8px",
-								left: "8px",
-								right: "8px",
-								background: "rgba(15, 23, 42, 0.9)",
-								border: "1px solid #334155",
-								borderRadius: "6px",
-								padding: "6px 10px",
-								fontSize: "0.65rem",
-								color: "#94a3b8",
-								zIndex: 50,
-								display: "grid",
-								gridTemplateColumns: "1fr 1fr",
-								gap: "2px 12px",
-							}}>
-								<div>Sensibilidad: <span style={{ color: results.gt_validation.sensitivity >= 0.9 ? "#22c55e" : "#f59e0b", fontWeight: "bold" }}>{(results.gt_validation.sensitivity * 100).toFixed(1)}%</span></div>
-								<div>Dice: <span style={{ color: "#60a5fa", fontWeight: "bold" }}>{results.gt_validation.dice.toFixed(3)}</span></div>
-								<div>Vol. Experto: {results.gt_validation.gt_volume_cm3.toFixed(2)} cm³</div>
-								<div>Vol. MART: {results.gt_validation.mart_volume_cm3.toFixed(2)} cm³</div>
-								<div style={{ color: results.gt_validation.missed_gt_volume_cm3 > 0 ? "#ef4444" : "#22c55e", gridColumn: "1 / -1" }}>
-									{results.gt_validation.missed_gt_volume_cm3 > 0 
-										? `⚠️ Omitido: ${results.gt_validation.missed_gt_volume_cm3.toFixed(2)} cm³`
-										: "✅ 100% detectado"}
+							{/* GT Validation Stats */}
+							{results?.gt_validation && (
+								<div style={{
+									position: "absolute",
+									bottom: "8px",
+									left: "8px",
+									right: "8px",
+									background: "rgba(15, 23, 42, 0.9)",
+									border: "1px solid #334155",
+									borderRadius: "6px",
+									padding: "6px 10px",
+									fontSize: "0.65rem",
+									color: "#94a3b8",
+									zIndex: 50,
+									display: "grid",
+									gridTemplateColumns: "1fr 1fr",
+									gap: "2px 12px",
+								}}>
+									<div>Sensibilidad: <span style={{ color: results.gt_validation.sensitivity >= 0.9 ? "#22c55e" : "#f59e0b", fontWeight: "bold" }}>{(results.gt_validation.sensitivity * 100).toFixed(1)}%</span></div>
+									<div>Dice: <span style={{ color: "#60a5fa", fontWeight: "bold" }}>{results.gt_validation.dice.toFixed(3)}</span></div>
+									<div>Vol. Experto: {results.gt_validation.gt_volume_cm3.toFixed(2)} cm³</div>
+									<div>Vol. MART: {results.gt_validation.mart_volume_cm3.toFixed(2)} cm³</div>
+									<div style={{ color: results.gt_validation.missed_gt_volume_cm3 > 0 ? "#ef4444" : "#22c55e", gridColumn: "1 / -1" }}>
+										{results.gt_validation.missed_gt_volume_cm3 > 0 
+											? `⚠️ Omitido: ${results.gt_validation.missed_gt_volume_cm3.toFixed(2)} cm³`
+											: "✅ 100% detectado"}
+									</div>
 								</div>
-							</div>
-						)}
+							)}
+						</div>
+					)}
 					</div>
-				)}
-				</div> {/* End split-screen wrapper */}
 				
 				{/* Pin Tooltip (Magnified) */}
 				{activePin && pinTooltipPos && (
@@ -2545,7 +2538,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 							Cargando mapa de calor...
 						</div>
 					)}
-				</>
+				</div>
 			)}
 			
 			{/* ══════════════════════════════════════════════════════════════════════ */}
