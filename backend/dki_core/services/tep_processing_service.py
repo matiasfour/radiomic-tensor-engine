@@ -95,7 +95,7 @@ class TEPProcessingService:
     # ═══════════════════════════════════════════════════════════════════════════
     # ROI SAFETY EROSION: Anti-costal invasion buffer (DYNAMIC based on spacing)
     # ═══════════════════════════════════════════════════════════════════════════
-    ROI_EROSION_MM = 5.0                   # Physical erosion in mm (Raised to 5mm for stronger chest wall exclusion)
+    ROI_EROSION_MM = 2.0                   # Physical erosion in mm (Lowered to 2mm to prevent peripheral airway/clot cropping)
     ROI_BONE_BUFFER_ITERATIONS = 5         # Extra bone buffer for subtraction
     ROI_MIN_VOLUME_RATIO = 0.20            # If ROI < 20% of original, mark for review
     
@@ -2040,8 +2040,8 @@ class TEPProcessingService:
         from scipy.ndimage import gaussian_laplace
         
         struct_3d = generate_binary_structure(3, 1)
-        # Dilate PA contrast to catch emboli
-        pa_dilated = binary_dilation(pa_mask, structure=struct_3d, iterations=3)
+        # Expand PA bounds to encapsulate the "dark holes" and occlusions
+        pa_dilated = binary_dilation(pa_mask, structure=struct_3d, iterations=7)
         
         # NEW: Lung Proximity Shield (Fast Slice-by-Slice)
         # Emboli happen in/near the lungs. The heart wall is too far from aerated lung.
@@ -3369,11 +3369,10 @@ class TEPProcessingService:
         # Label 2: Soft Tissue (-100 to 30)
         lut_map[(data >= -100) & (data < 30)] = 2
         
-        # Label 3: Suspect Thrombus (30 to 100) - RESTRICTED TO LUNGS/VESSELS
+        # Label 3: Suspect Thrombus (30 to 100)
+        # Instead of strict domain_mask, we just allow all 30-100 HU to be red
+        # (This ensures human-visible clots ALWAYS show up as red in the heatmap)
         thrombus_pixels = (data >= 30) & (data <= 100)
-        # Si le pasamos la máscara anatómica, limpiamos la pared torácica
-        if domain_mask is not None:
-            thrombus_pixels = thrombus_pixels & (domain_mask > 0)
         
         lut_map[thrombus_pixels] = 3
         
