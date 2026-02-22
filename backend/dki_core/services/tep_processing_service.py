@@ -1100,55 +1100,61 @@ class TEPProcessingService:
         """
         # IRONDOME: Force 3D context
         data = self._ensure_3d(data)
-        # Select optimal sigma based on physical spacing (~1.5 to 3mm vessels)
-        min_spacing = np.min(spacing)
-        sigma = 1.5 / min_spacing
         
-        # Compute Hessian
-        H_elems = hessian_matrix(data, sigma=sigma, order='rc')
-        eigvals = hessian_matrix_eigvals(H_elems)
+        # REFACTOR: Multi-scale Hessian to capture both micro-vessels and normal vessels
+        vesselness_max = np.zeros_like(data, dtype=np.float32)
+        l1_last, l2_last, l3_last = None, None, None
         
-        # Sort by magnitude (|e1| <= |e2| <= |e3|)
-        # skimage returns in standard order, usually e1 < e2 < e3 (algebraic).
-        # Sort by magnitude (|e1| <= |e2| <= |e3|)
-        # skimage returns in standard order, usually e1 < e2 < e3 (algebraic).
-        # We need magnitude sorting for vesselness.
-        
-        # Check dimensionality
-        if eigvals.shape[0] < 3:
-            # Handle 2D case (likely single slice crop)
-            # Pad with zeros for 3rd dimension to avoid crash
-            l1 = eigvals[0]
-            l2 = eigvals[1]
-            l3 = np.zeros_like(l1)
-            # Vesselness in 2D: l2 is the main curvature
-        else:
-            abs_eigvals = np.abs(eigvals)
-            indices = np.argsort(abs_eigvals, axis=0) # Sort along eigenvalue dimension (0)
+        for scale in [0.5, 1.0]:  # 0.5 captures 1-2 pixel distal branches
+            # Compute Hessian matrix for current scale
+            H_elems = hessian_matrix(data, sigma=scale, order='rc')
             
-            # Re-order actual eigenvalues
-            l1 = np.take_along_axis(eigvals, indices, axis=0)[0]
-            l2 = np.take_along_axis(eigvals, indices, axis=0)[1]
-            l3 = np.take_along_axis(eigvals, indices, axis=0)[2]
+            # Compute eigenvalues (skimage returns them in descending order: |lambda1| >= |lambda2| >= |lambda3|)
+            # For 3D, hessian_matrix_eigvals returns a list of 3 arrays.
+            eigvals = hessian_matrix_eigvals(H_elems)
+            
+            # Check dimensionality
+            if eigvals.shape[0] < 3:
+                # Handle 2D case (likely single slice crop)
+                l1 = eigvals[0]
+                l2 = eigvals[1]
+                l3 = np.zeros_like(l1)
+            else:
+                # Sort eigenvalues by absolute magnitude: |lambda1| <= |lambda2| <= |lambda3|
+                abs_eigvals = np.abs(eigvals)
+                sort_indices = np.argsort(abs_eigvals, axis=0) # Sort along eigenvalue dimension (0)
+                
+                l1 = np.take_along_axis(eigvals, sort_indices[0:1], axis=0)[0]
+                l2 = np.take_along_axis(eigvals, sort_indices[1:2], axis=0)[0]
+                l3 = np.take_along_axis(eigvals, sort_indices[2:3], axis=0)[0]
+            
+            l1_last, l2_last, l3_last = l1, l2, l3
+            
+            # Frangi parameters
+            alpha = 0.5
+            beta = 0.5
+            c = 500  # Half the maximum Hessian norm
+            
+            ra = np.abs(l2) / (np.abs(l3) + 1e-10)
+            rb = np.abs(l1) / (np.sqrt(np.abs(l2 * l3)) + 1e-10)
+            s = np.sqrt(l1**2 + l2**2 + l3**2)
+            
+            vess_scale = (
+                (1 - np.exp(-(ra**2) / (2 * alpha**2))) *
+                np.exp(-(rb**2) / (2 * beta**2)) *
+                (1 - np.exp(-(s**2) / (2 * c**2)))
+            )
+            
+            # Suppression conditions for bright tubes (contrast enhanced blood)
+            condition = (l2 < 0) & (l3 < 0)
+            vess_scale[~condition] = 0
+            
+            vesselness_max = np.maximum(vesselness_max, vess_scale)
+            
+        # Handle NaNs
+        vesselness = np.nan_to_num(vesselness_max)
         
-        # Frangi Vesselness (Simplified for speed)
-        # 3D Line: l1 low, l2 high, l3 high (magnitude)
-        # Bright tube: l2 < 0, l3 < 0
-        # Dark tube: l2 > 0, l3 > 0
-        
-        # Similarity measures
-        Ra = np.abs(l2) / (np.abs(l3) + 1e-6) # Plate-like
-        Rb = np.abs(l1) / (np.sqrt(np.abs(l2 * l3)) + 1e-6) # Blob-like
-        S = np.sqrt(l1**2 + l2**2 + l3**2)
-        
-        # Vesselness formula filters
-        has_structure = (S > 20) # Min structureness (HU dependent)
-        is_tubular = (Rb < 0.4) & (Ra < 0.5) # Line-like (Rb tightened from 0.5→0.4 to reject heart chambers)
-        
-        vesselness = np.zeros_like(data)
-        vesselness[has_structure & is_tubular] = 1.0
-        
-        return vesselness, l1, l2, l3
+        return vesselness, l1_last, l2_last, l3_last
 
     def _apply_vector_guided_extrapolation(self, candidates_mask, data, spacing, fac_map):
         """
@@ -2093,6 +2099,8 @@ class TEPProcessingService:
         # 7. Candidate Extraction (WHOLE-CLOT PRESERVATION)
         from scipy.ndimage import label as scipy_label
         from scipy.ndimage import mean as ndi_mean
+        from scipy.ndimage import sum as ndi_sum
+        from scipy.ndimage import binary_dilation
         
         labeled_defects, num_defects = scipy_label(defect_mask)
         candidates = np.zeros_like(defect_mask, dtype=bool)
@@ -2101,14 +2109,33 @@ class TEPProcessingService:
             # Get the mean score for each entire physical clot
             mean_scores = ndi_mean(score_map, labeled_defects, index=range(1, num_defects + 1))
             
+            voxel_volume = spacing[0] * spacing[1] * spacing[2] if spacing is not None else 1.0
+            volumes = ndi_sum(np.ones_like(defect_mask), labeled_defects, index=range(1, num_defects + 1)) * voxel_volume
+            
             # Handle scalar return if only 1 defect found
             if np.isscalar(mean_scores):
                 mean_scores = [mean_scores]
+                volumes = [volumes]
                 
-            # If the clot as a WHOLE has a suspicious average score, keep the WHOLE clot
-            for i, score in enumerate(mean_scores):
+            # NEW: Topological map of the PA tree vicinity (3 iterations ~ 2-3mm reach)
+            pa_vicinity = binary_dilation(pa_mask, iterations=3)
+                
+            for i, (score, vol) in enumerate(zip(mean_scores, volumes)):
+                clot_pixels = (labeled_defects == (i + 1))
+                
+                # TOPOLOGICAL CHECK: Is this specific clot connected to the PA tree?
+                is_connected = np.any(clot_pixels & pa_vicinity)
+                
+                # SMALL VESSEL BYPASS WITH TOPOLOGY
+                if vol < 30.0:
+                    if score >= 2.0 and is_connected:
+                        score = 3.0  # Safe to promote: it's a real distal branch micro-clot
+                    elif not is_connected:
+                        score = 0.0  # SUPPRESS: Isolated noise/artifact in the parenchyma
+                        
                 if score >= 1.0:  # Lowered slightly since we are averaging the whole mass
-                    candidates[labeled_defects == (i + 1)] = True
+                    candidates[clot_pixels] = True
+                    score_map[clot_pixels] = score
         
         if log_callback:
             log_callback(f"   🔍 [DIAG] score_map={score_map.shape}({score_map.ndim}D) candidates={candidates.shape}({candidates.ndim}D) sum={int(np.sum(candidates))}")
