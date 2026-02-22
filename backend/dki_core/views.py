@@ -687,20 +687,39 @@ class StudyViewSet(viewsets.ModelViewSet):
         processor = TEPProcessingService()
         
         # Construct .mat ground truth path (optional - for clinical validation)
+        # Mat files live in BASE_DIR/mat/
         mat_filepath = None
-        if study.dicom_archive and study.dicom_archive.name:
-            import re
-            zip_basename = os.path.basename(study.dicom_archive.name)
-            # Extract folder name: "imported_PAT019.zip" → "PAT019", "imported_PAT019_abc123.zip" → "PAT019"
-            match = re.match(r'imported_(.+?)(?:_[A-Za-z0-9]{6,8})?\.zip$', zip_basename)
-            if match:
-                folder_name = match.group(1)
-                mat_path = os.path.join(str(settings.DEFAULT_IMPORT_DIR), 'mat', f'{folder_name}.mat')
-                if os.path.exists(mat_path):
-                    mat_filepath = mat_path
-                    log(f"Ground truth file found: {mat_path}", stage='SEGMENTATION')
-                else:
-                    log(f"No ground truth file at: {mat_path} (skipping GT validation)", stage='SEGMENTATION', level='DEBUG')
+        mat_dir = os.path.join(str(settings.BASE_DIR), 'mat')
+        if os.path.isdir(mat_dir):
+            mat_files = [f for f in os.listdir(mat_dir) if f.endswith('.mat')]
+            
+            if len(mat_files) == 1:
+                # Only one .mat file — use it directly
+                mat_filepath = os.path.join(mat_dir, mat_files[0])
+            elif len(mat_files) > 1:
+                # Multiple .mat files — try to match by study identifiers
+                study_identifiers = set()
+                if study.patient_id:
+                    study_identifiers.add(study.patient_id.lower())
+                if study.dicom_archive and study.dicom_archive.name:
+                    # "dicom_archives/imported_PAT019_xxx.zip" → "imported_pat019_xxx"
+                    study_identifiers.add(os.path.basename(study.dicom_archive.name).replace('.zip', '').lower())
+                if study.dicom_directory:
+                    study_identifiers.add(os.path.basename(study.dicom_directory).lower())
+                
+                for mat_file in mat_files:
+                    mat_name = mat_file.replace('.mat', '').lower()
+                    for identifier in study_identifiers:
+                        if mat_name in identifier or identifier in mat_name:
+                            mat_filepath = os.path.join(mat_dir, mat_file)
+                            break
+                    if mat_filepath:
+                        break
+            
+            if mat_filepath:
+                log(f"Ground truth file found: {mat_filepath}", stage='SEGMENTATION')
+            elif mat_files:
+                log(f"Mat files found but no match for this study: {mat_files}", stage='SEGMENTATION', level='DEBUG')
         
         results = processor.process_study(
             data, 
