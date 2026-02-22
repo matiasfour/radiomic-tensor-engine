@@ -256,7 +256,7 @@ const DiagnosticStation: React.FC<DiagnosticStationProps> = ({
 
 	// ─── Visible Pins (current slice) ───────────────────────────
 	const visiblePins = (findingsPins || []).filter(
-		(p) => p.location.slice_z === currentSlice
+		(p) => (p.location.slice_z_inverted ?? p.location.slice_z) === currentSlice
 	);
 
 	// ─── Render ─────────────────────────────────────────────────

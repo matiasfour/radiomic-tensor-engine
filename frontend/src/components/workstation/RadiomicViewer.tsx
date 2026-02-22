@@ -1205,7 +1205,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 		// 1. Setup Coordinates
 		const px = activePin.location.coord_x;
 		const py = activePin.location.coord_y;
-		const sliceIndex = activePin.location.slice_z;
+		const sliceIndex = activePin.location.slice_z_inverted ?? activePin.location.slice_z;
 
 		const zoom = 3.0;
 		const size = tooltipCanvas.width; // 250px
@@ -1249,7 +1249,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 				
 				img.onload = () => {
 					// Ensure component is still mounted/pin is still active
-					if (activePin.location.slice_z !== sliceIndex) return;
+					if ((activePin.location.slice_z_inverted ?? activePin.location.slice_z) !== sliceIndex) return;
 
 					// Draw Heatmap Overlay with High Opacity
 					ctx.globalAlpha = 0.85; // 85% opacity to see through to bone/tissue but see red clearly
@@ -1948,7 +1948,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 							>
 								{findingsPins
 									.filter(pin => {
-										const z = pin.location.slice_z;
+										const z = pin.location.slice_z_inverted ?? pin.location.slice_z;
 										// Only show if slice matches AND exists within current volume (Anti-Ghosting)
 										return z === viewerState.currentSlice && z < viewerState.totalSlices;
 									})
@@ -2135,12 +2135,12 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 									<div
 										key={pin.id}
 										onClick={() => {
-											updateState({ currentSlice: pin.location.slice_z });
+											updateState({ currentSlice: pin.location.slice_z_inverted ?? pin.location.slice_z });
 										}}
 										style={{
 											padding: "8px",
-											background: viewerState.currentSlice === pin.location.slice_z ? "rgba(59, 130, 246, 0.2)" : "rgba(255,255,255,0.05)",
-											border: viewerState.currentSlice === pin.location.slice_z ? "1px solid #3b82f6" : "1px solid transparent",
+											background: viewerState.currentSlice === (pin.location.slice_z_inverted ?? pin.location.slice_z) ? "rgba(59, 130, 246, 0.2)" : "rgba(255,255,255,0.05)",
+											border: viewerState.currentSlice === (pin.location.slice_z_inverted ?? pin.location.slice_z) ? "1px solid #3b82f6" : "1px solid transparent",
 											borderRadius: "6px",
 											cursor: "pointer",
 											display: "flex",
@@ -2154,7 +2154,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 												{pin.type === "TEP_DEFINITE" ? "Trombo Definido" : "Sospecha"}
 											</div>
 											<div style={{ fontSize: "0.75rem", color: "#94a3b8" }}>
-												Slice {pin.location.slice_z + 1} • Score {pin.tooltip_data.score_total.toFixed(1)}
+												Slice {(pin.location.slice_z_inverted ?? pin.location.slice_z) + 1} • Score {pin.tooltip_data.score_total.toFixed(1)}
 											</div>
 										</div>
 									</div>
