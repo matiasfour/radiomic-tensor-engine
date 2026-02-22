@@ -155,24 +155,33 @@ class CTValidationService:
                 return False, f"Reconstruction kernel '{kernel}' is too sharp. Must use smooth kernel (e.g., FC21, SOFT, STANDARD).", []
         self.validation_details['validation_checks']['kernel'] = kernel_check
         
-        # 6. Check Series consistency
+        # 6. Check Series consistency — Auto-select largest series if multiple
         series_uids = set()
+        file_series_map = {}  # file -> series_uid
         for f in dicom_files:
             try:
                 ds = pydicom.dcmread(f, stop_before_pixels=True)
                 series_uid = getattr(ds, 'SeriesInstanceUID', None)
                 if series_uid:
                     series_uids.add(series_uid)
+                    file_series_map[f] = series_uid
             except:
                 continue
         
         self.validation_details['validation_checks']['series_consistency'] = {
             'series_count': len(series_uids),
-            'passed': len(series_uids) <= 1
+            'passed': True  # Always pass — we auto-select
         }
         
         if len(series_uids) > 1:
-            return False, f"Multiple series detected ({len(series_uids)}). Please upload a single CT series.", []
+            # Auto-select the series with the most files (main diagnostic series)
+            from collections import Counter
+            series_counts = Counter(file_series_map.values())
+            best_series = series_counts.most_common(1)[0][0]
+            dicom_files = [f for f, uid in file_series_map.items() if uid == best_series]
+            self.validation_details['validation_checks']['series_consistency']['auto_selected'] = True
+            self.validation_details['validation_checks']['series_consistency']['selected_series_files'] = len(dicom_files)
+            self.validation_details['validation_checks']['series_consistency']['total_series'] = len(series_uids)
         
         # 7. Check minimum number of slices (brain CT typically >100 slices)
         self.validation_details['validation_checks']['slice_count'] = {
