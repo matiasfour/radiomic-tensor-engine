@@ -589,14 +589,16 @@ class TEPProcessingService:
             centroid = f.get('centroid', (0, 0, 0))
             cz, cy, cx = float(centroid[0]), float(centroid[1]), float(centroid[2])
             
-            # ── BOUNDARY GUARD: Clamp Z to valid range [0, total_slices-1] ──
+            # ── BOUNDARY GUARD ──
             clamped_z = max(0, min(int(cz), total_slices - 1))
+            inverted_z = max(0, min((total_slices - 1) - int(cz), total_slices - 1))
             
             pin = {
                 'id': int(f['id']),
                 'type': 'TEP_DEFINITE' if f.get('confidence') == 'DEFINITE' else 'TEP_SUSPICIOUS',
                 'location': {
                     'slice_z': clamped_z,
+                    'slice_z_inverted': inverted_z,  # ADDED FOR FRONTEND SYNC
                     'coord_x': int(cx + crop_info['crop_bounds']['x_start']),
                     'coord_y': int(cy + crop_info['crop_bounds']['y_start'])
                 },
@@ -1904,8 +1906,25 @@ class TEPProcessingService:
         if log_callback and voxels_blocked > 0:
             log_callback(f"   🛡️ Visual Noise Filter blocked {voxels_blocked:,} artifact voxels")
         
-        # 7. Candidate Extraction
-        candidates = defect_mask & (score_map >= 1.5)
+        # 7. Candidate Extraction (WHOLE-CLOT PRESERVATION)
+        from scipy.ndimage import label as scipy_label
+        from scipy.ndimage import mean as ndi_mean
+        
+        labeled_defects, num_defects = scipy_label(defect_mask)
+        candidates = np.zeros_like(defect_mask, dtype=bool)
+        
+        if num_defects > 0:
+            # Get the mean score for each entire physical clot
+            mean_scores = ndi_mean(score_map, labeled_defects, index=range(1, num_defects + 1))
+            
+            # Handle scalar return if only 1 defect found
+            if np.isscalar(mean_scores):
+                mean_scores = [mean_scores]
+                
+            # If the clot as a WHOLE has a suspicious average score, keep the WHOLE clot
+            for i, score in enumerate(mean_scores):
+                if score >= 1.0:  # Lowered slightly since we are averaging the whole mass
+                    candidates[labeled_defects == (i + 1)] = True
         
         if log_callback:
             log_callback(f"   🔍 [DIAG] score_map={score_map.shape}({score_map.ndim}D) candidates={candidates.shape}({candidates.ndim}D) sum={int(np.sum(candidates))}")

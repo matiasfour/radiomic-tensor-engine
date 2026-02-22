@@ -287,6 +287,7 @@ export interface FindingPin {
 	type: 'TEP_DEFINITE' | 'TEP_SUSPICIOUS';
 	location: {
 		slice_z: number;
+		slice_z_inverted?: number;
 		coord_x: number;
 		coord_y: number;
 	};
