@@ -283,11 +283,11 @@ class DiscoveryService:
         
         # Keywords para TEP (fuzzy match)
         TEP_KEYWORDS = [
-            'tep', 'angiotc', 'angio tc', 'angio-tc', 'ctpa', 
+            'tep', 'angiotc', 'angio tc', 'angio-tc', 'ctpa', 'cta',
             'pulmonar', 'pulmonary', 'embol', 'tromboembol',
             'arteria pulmon', 'pulmonary arter', 'pe protocol',
             'torax', 'thorax', 'chest', 'toracic', 'thoracic',
-            'pecho', 'lung', 'pulmon', 'torso'
+            'pecho', 'lung', 'pulmon', 'torso', 'angiografia'
         ]
         
         # Keywords para CEREBRO (fuzzy match)
@@ -410,17 +410,17 @@ class DiscoveryService:
             bone_mask = volume > bone_min
             bone_percentage = np.mean(bone_mask)
             
-            # Calcular centroide del hueso para detectar región
-            if bone_mask.any():
-                z_indices = np.where(bone_mask)[0]
-                mean_z = np.mean(z_indices)
-                z_position_ratio = mean_z / volume.shape[0]
-            else:
-                z_position_ratio = 0.5
+            # ═══════════════════════════════════════════════════════════════
+            # LUNG TISSUE DETECTION: Definitive marker for THORAX
+            # Aerated lung tissue has HU < -500. If significant lung tissue
+            # is present, this is DEFINITIVELY a thorax study.
+            # ═══════════════════════════════════════════════════════════════
+            lung_mask = (volume > -900) & (volume < -500)
+            lung_percentage = np.mean(lung_mask)
             
-            # Heurísticas para determinar región
-            # Head CT: mucho hueso concentrado (cráneo), forma redondeada
-            # Chest CT: hueso distribuido (costillas), forma oval
+            # Air outside body (HU around -1000 to -1024)
+            air_mask = volume < -900
+            air_percentage = np.mean(air_mask)
             
             # Análisis de la forma en corte central
             central_slice = volume[volume.shape[0] // 2]
@@ -438,13 +438,24 @@ class DiscoveryService:
             else:
                 aspect_ratio = 1.0
             
-            # Head CT típicamente tiene aspect ratio cercano a 1 (circular)
-            # Chest CT típicamente tiene aspect ratio < 1 (más ancho que alto)
-            is_head = bool(aspect_ratio > 0.8 and bone_percentage > 0.02)
-            is_thorax = bool(aspect_ratio < 0.7 or bone_percentage < 0.015)
+            # ═══════════════════════════════════════════════════════════════
+            # CLASSIFICATION LOGIC:
+            # - Lung tissue > 3% → DEFINITIVELY THORAX (lungs are unmistakable)
+            # - No lung tissue + round shape + dense bone → HEAD
+            # - Ambiguous → neither (will raise manual selection)
+            # ═══════════════════════════════════════════════════════════════
+            is_thorax = bool(lung_percentage > 0.03)  # >3% lung tissue = thorax
+            is_head = bool(lung_percentage < 0.01 and aspect_ratio > 0.85 and bone_percentage > 0.03)
+            
+            self.log(
+                f"📊 Volume Analysis: lung={lung_percentage:.1%}, bone={bone_percentage:.1%}, "
+                f"aspect_ratio={aspect_ratio:.2f} → thorax={is_thorax}, head={is_head}",
+                level='INFO'
+            )
             
             return {
                 'bone_percentage': float(bone_percentage),
+                'lung_percentage': float(lung_percentage),
                 'aspect_ratio': float(aspect_ratio),
                 'is_head': is_head,
                 'is_thorax': is_thorax,
