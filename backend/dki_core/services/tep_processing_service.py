@@ -49,7 +49,7 @@ class TEPProcessingService:
     # TEP-specific HU thresholds
     CONTRAST_BLOOD_RANGE = (150, 500)      # Contrast-enhanced arterial blood
     THROMBUS_RANGE = (40, 100)             # Fresh thrombus (Raised min from 30→40 to exclude pericardial fat)
-    PULMONARY_ARTERY_MIN_HU = 220          # Minimum HU for pulmonary artery (Raised to 220)
+    PULMONARY_ARTERY_MIN_HU = 150          # Minimum HU for pulmonary artery (Lowered to 150 for peripheral vessels)
     FILLING_DEFECT_MAX_HU = 100            # Maximum HU for filling defect
     LUNG_PARENCHYMA_RANGE = (-900, -500)   # Lung tissue
     
@@ -2080,7 +2080,7 @@ class TEPProcessingService:
         # Only award bonus points IF the pixel is already a candidate defect
         score_map[(v_map > 0.2) & defect_mask] += 1.0
         score_map[(coherence_map < 0.5) & defect_mask] += 1.0
-        score_map[(data >= 40) & (data <= 80) & defect_mask] += 0.5
+        score_map[(data >= 40) & (data <= 80) & defect_mask] += 1.0  # Boosted: perfect clot density should strongly influence Definite status
         
         # Visual Noise Filter
         noise_mask = (hodge_score > 300) | (np.abs(ricci_score) > 5.0)
