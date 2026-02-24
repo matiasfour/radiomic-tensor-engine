@@ -1270,21 +1270,20 @@ class StudyViewSet(viewsets.ModelViewSet):
             nii = nib.load(map_path)
             data = nii.get_fdata()
             
-            total_slices = data.shape[0] if len(data.shape) >= 3 else 1
+            total_slices = data.shape[2] if len(data.shape) >= 3 else 1
             slices_data = []
             
             for slice_idx in range(total_slices):
                 # Get the slice - handle 3D and 4D (RGB) data
-                # NIfTI saved as (Z, Y, X, [3]) from numpy convention
                 if len(data.shape) == 4:
-                    slice_data = data[slice_idx, :, :, :]
+                    slice_data = data[:, :, slice_idx, :]
                     if slice_data.max() > 1.0:
                         img_array = np.clip(slice_data, 0, 255).astype(np.uint8)
                     else:
                         img_array = (slice_data * 255).astype(np.uint8)
                     img = Image.fromarray(img_array, mode='RGB')
                 elif len(data.shape) >= 3:
-                    slice_data = data[slice_idx, :, :]
+                    slice_data = data[:, :, slice_idx]
                     slice_data = np.nan_to_num(slice_data, nan=0)
                     min_val = slice_data.min()
                     max_val = slice_data.max()
@@ -1307,7 +1306,10 @@ class StudyViewSet(viewsets.ModelViewSet):
                 else:
                     continue
                 
-                # Removed NIfTI rotation/flip to match DICOM 1:1 orientation                
+                # Rotate for correct orientation
+                img = img.transpose(Image.Transpose.ROTATE_90)
+                img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+                
                 # Resize for performance
                 orig_w, orig_h = img.size
                 if orig_w > max_size or orig_h > max_size:
@@ -1394,7 +1396,7 @@ class StudyViewSet(viewsets.ModelViewSet):
                 data = nii.get_fdata()
                 StudyViewSet._nifti_cache[map_path] = data
             
-            total_slices = data.shape[0] if len(data.shape) >= 3 else 1
+            total_slices = data.shape[2] if len(data.shape) >= 3 else 1
             
             if slice_index < 0 or slice_index >= total_slices:
                 return Response({
@@ -1404,8 +1406,8 @@ class StudyViewSet(viewsets.ModelViewSet):
             
             # Get the slice - handle 3D and 4D (RGB) data
             if len(data.shape) == 4:
-                # RGB data: shape is (Z, Y, X, 3)
-                slice_data = data[slice_index, :, :, :]
+                # RGB data: shape is (x, y, z, 3)
+                slice_data = data[:, :, slice_index, :]
                 # Normalize if needed
                 if slice_data.max() > 1.0:
                     img_array = np.clip(slice_data, 0, 255).astype(np.uint8)
@@ -1413,7 +1415,7 @@ class StudyViewSet(viewsets.ModelViewSet):
                     img_array = (slice_data * 255).astype(np.uint8)
                 img = Image.fromarray(img_array, mode='RGB')
             elif len(data.shape) >= 3:
-                slice_data = data[slice_index, :, :]
+                slice_data = data[:, :, slice_index]
                 # Normalize to 0-255 for visualization
                 slice_data = np.nan_to_num(slice_data, nan=0)
                 
@@ -1452,7 +1454,9 @@ class StudyViewSet(viewsets.ModelViewSet):
                     img_array = np.zeros_like(slice_data, dtype=np.uint8)
                 img = Image.fromarray(img_array, mode='L')
             
-            # Removed NIfTI rotation/flip to match DICOM 1:1 orientation
+            # Rotate if needed (NIfTI vs DICOM orientation)
+            img = img.transpose(Image.Transpose.ROTATE_90)
+            img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
             
             # Save to bytes
             buffer = io.BytesIO()
@@ -1508,7 +1512,7 @@ class StudyViewSet(viewsets.ModelViewSet):
         try:
             nii = nib.load(map_path)
             data = nii.get_fdata()
-            total_slices = data.shape[0] if len(data.shape) >= 3 else 1
+            total_slices = data.shape[2] if len(data.shape) >= 3 else 1
             
             return Response({
                 'total_slices': total_slices,
