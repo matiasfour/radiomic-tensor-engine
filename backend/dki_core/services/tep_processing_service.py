@@ -1493,14 +1493,15 @@ class TEPProcessingService:
         crop_voxels_y = min(crop_voxels_y, shape_y)
         crop_voxels_x = min(crop_voxels_x, shape_x)
         
-        # Calculate crop bounds
+        # Calculate crop bounds (with 30px peripheral buffer to avoid clipping border clots)
+        buffer = 30
         half_y = crop_voxels_y // 2
         half_x = crop_voxels_x // 2
         
-        y_start = max(0, center_y - half_y)
-        y_end = min(shape_y, center_y + half_y)
-        x_start = max(0, center_x - half_x)
-        x_end = min(shape_x, center_x + half_x)
+        y_start = max(0, center_y - half_y - buffer)
+        y_end = min(shape_y, center_y + half_y + buffer)
+        x_start = max(0, center_x - half_x - buffer)
+        x_end = min(shape_x, center_x + half_x + buffer)
         
         # Apply crop based on dimensionality
         if is_3d:
@@ -2041,7 +2042,7 @@ class TEPProcessingService:
         
         struct_3d = generate_binary_structure(3, 1)
         # Expand PA bounds to encapsulate the "dark holes" and occlusions
-        pa_dilated = binary_dilation(pa_mask, structure=struct_3d, iterations=7)
+        pa_dilated = binary_dilation(pa_mask, structure=struct_3d, iterations=8)
         
         # NEW: Lung Proximity Shield (Fast Slice-by-Slice)
         # Emboli happen in/near the lungs. The heart wall is too far from aerated lung.
@@ -3074,7 +3075,7 @@ class TEPProcessingService:
         # Dilate PA mask to include filling defects that might be
         # completely occluding the lumen
         struct = generate_binary_structure(3, 1)
-        pa_dilated = binary_dilation(pa_mask, structure=struct, iterations=3)
+        pa_dilated = binary_dilation(pa_mask, structure=struct, iterations=8)
         
         # Find low-HU regions within dilated PA (potential thrombi)
         # Thrombus HU: typically 30-100 HU
