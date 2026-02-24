@@ -76,11 +76,11 @@ class TEPProcessingService:
     # ═══════════════════════════════════════════════════════════════════════════
     # SCORING SYSTEM: Replace strict AND with weighted scoring
     # ═══════════════════════════════════════════════════════════════════════════
-    SCORE_HU_POINTS = 3                    # HU criterion contributes 3 points (Restored to 3 because Thrombus is principal feature)
+    SCORE_HU_POINTS = 1                    # HU criterion contributes 1 point (equal weight with MK/FAC to prevent HU-alone DEFINITE)
     SCORE_MK_POINTS = 1                    # MK criterion contributes 1 point
     SCORE_FAC_POINTS = 1                   # FAC criterion contributes 1 point
     SCORE_THRESHOLD_SUSPICIOUS = 2         # Score >= 2 = suspicious (yellow/orange)
-    SCORE_THRESHOLD_DEFINITE = 2.5         # Score >= 2.5 = definite thrombus (Lowered for sensitivity)
+    SCORE_THRESHOLD_DEFINITE = 3.0         # Score >= 3.0 = definite thrombus (requires 3/4 evidence channels)
     
     # ═══════════════════════════════════════════════════════════════════════════
     # CONTRAST INHIBITOR: Pixels with HU > this threshold get Score = 0
@@ -2041,7 +2041,7 @@ class TEPProcessingService:
         
         struct_3d = generate_binary_structure(3, 1)
         # Expand PA bounds to encapsulate the "dark holes" and occlusions
-        pa_dilated = binary_dilation(pa_mask, structure=struct_3d, iterations=8)
+        pa_dilated = binary_dilation(pa_mask, structure=struct_3d, iterations=3)
         
         # NEW: Lung Proximity Shield (Fast Slice-by-Slice)
         # Emboli happen in/near the lungs. The heart wall is too far from aerated lung.
@@ -2119,13 +2119,23 @@ class TEPProcessingService:
                 volumes = [volumes]
                 
             # Topological map of PA tree vicinity (5 iterations ~ 4-5mm reach for distal branches)
-            pa_vicinity = binary_dilation(pa_mask, iterations=5)
+            pa_vicinity = binary_dilation(pa_mask, iterations=3)
                 
             for i, (score, vol) in enumerate(zip(mean_scores, volumes)):
                 clot_pixels = (labeled_defects == (i + 1))
                 
                 # TOPOLOGICAL CHECK: Is this specific clot connected to the PA tree?
                 is_connected = np.any(clot_pixels & pa_vicinity)
+                
+                # AIR CONTAINMENT CHECK: If >50% of clot border touches air, it's NOT intravascular
+                is_air_surrounded = False
+                if is_connected:
+                    border = binary_dilation(clot_pixels, iterations=1) & ~clot_pixels
+                    if np.sum(border) > 0:
+                        air_fraction = np.sum(data[border] < -400) / np.sum(border)
+                        is_air_surrounded = air_fraction > 0.5
+                        if is_air_surrounded:
+                            is_connected = False  # Override: can't be intravascular if surrounded by air
                 
                 # SMALL VESSEL BYPASS WITH TOPOLOGY
                 if vol < 30.0:
@@ -2277,7 +2287,7 @@ class TEPProcessingService:
                     'id': idx + 1,
                     'volume': candidate_volume_mm3 / 1000.0,  # Convert mm³ → cm³
                     'volume_mm3': candidate_volume_mm3,
-                    'confidence': 'DEFINITE',
+                    'confidence': 'DEFINITE' if float(mean_score) >= self.SCORE_THRESHOLD_DEFINITE else 'SUSPICIOUS',
                     'predicted_recovery_fac': 0.5,
                     'fac_mean': rugosity['fac_mean'],
                     'mean_hu': hu_mean,
