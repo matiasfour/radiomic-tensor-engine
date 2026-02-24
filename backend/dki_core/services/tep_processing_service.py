@@ -76,11 +76,11 @@ class TEPProcessingService:
     # ═══════════════════════════════════════════════════════════════════════════
     # SCORING SYSTEM: Replace strict AND with weighted scoring
     # ═══════════════════════════════════════════════════════════════════════════
-    SCORE_HU_POINTS = 3                    # HU criterion contributes 3 points (Restored to 3 because Thrombus is principal feature)
+    SCORE_HU_POINTS = 1                    # HU criterion contributes 1 point (equal weight with MK/FAC to prevent HU-alone DEFINITE)
     SCORE_MK_POINTS = 1                    # MK criterion contributes 1 point
     SCORE_FAC_POINTS = 1                   # FAC criterion contributes 1 point
     SCORE_THRESHOLD_SUSPICIOUS = 2         # Score >= 2 = suspicious (yellow/orange)
-    SCORE_THRESHOLD_DEFINITE = 2.5         # Score >= 2.5 = definite thrombus (Lowered for sensitivity)
+    SCORE_THRESHOLD_DEFINITE = 3.0         # Score >= 3.0 = definite thrombus (requires 3/4 evidence channels)
     
     # ═══════════════════════════════════════════════════════════════════════════
     # CONTRAST INHIBITOR: Pixels with HU > this threshold get Score = 0
@@ -551,7 +551,7 @@ class TEPProcessingService:
         # UX METADATA GENERATION (Smart Scrollbar & Diagnostic Pins)
         # ════════════════════════════════════════════════════════════════════════
         
-        total_slices = int(data.shape[0])  # Original volume Z count
+        total_slices = int(data.shape[2])  # Original volume Z count (data is X, Y, Z)
         
         # 1. Smart Navigator Data (Active Slices)
         # Use the EXPANDED (full-size) masks so indices match total_slices
@@ -587,9 +587,9 @@ class TEPProcessingService:
             if vol_mm3 < 5.0:
                 continue
             
-            # Centroid is (z, y, x) in numpy convention — from the CROPPED volume
+            # Centroid is (x, y, z) in numpy convention — from the CROPPED volume (X, Y, Z)
             centroid = f.get('centroid', (0, 0, 0))
-            cz, cy, cx = float(centroid[0]), float(centroid[1]), float(centroid[2])
+            cx, cy, cz = float(centroid[0]), float(centroid[1]), float(centroid[2])
             
             # ── BOUNDARY GUARD ──
             clamped_z = max(0, min(int(cz), total_slices - 1))
@@ -1459,11 +1459,11 @@ class TEPProcessingService:
         is_3d = data.ndim == 3
         
         if is_3d:
-            # 3D: shape is (Z, Y, X) - crop Y and X (axes 1 and 2)
-            y_axis, x_axis = 1, 2
-            shape_y, shape_x = data.shape[1], data.shape[2]
+            # 3D: shape is (X, Y, Z) - crop X and Y (axes 0 and 1)
+            y_axis, x_axis = 1, 0
+            shape_y, shape_x = data.shape[1], data.shape[0]
             spacing_y = spacing[1] if len(spacing) > 1 else 1.0
-            spacing_x = spacing[2] if len(spacing) > 2 else 1.0
+            spacing_x = spacing[0] if len(spacing) > 0 else 1.0
         else:
             # 2D: shape is (Y, X) - crop both axes
             y_axis, x_axis = 0, 1
@@ -1476,7 +1476,7 @@ class TEPProcessingService:
             com = center_of_mass(thorax_mask.astype(float))
             if is_3d:
                 center_y = int(com[1])  # Y is axis 1
-                center_x = int(com[2])  # X is axis 2
+                center_x = int(com[0])  # X is axis 0
             else:
                 center_y = int(com[0])
                 center_x = int(com[1])
@@ -1505,8 +1505,8 @@ class TEPProcessingService:
         
         # Apply crop based on dimensionality
         if is_3d:
-            # 3D: Keep all Z slices, crop Y and X
-            data_cropped = data[:, y_start:y_end, x_start:x_end]
+            # 3D: Keep all Z slices, crop X and Y
+            data_cropped = data[x_start:x_end, y_start:y_end, :]
         else:
             # 2D: Crop Y and X directly
             data_cropped = data[y_start:y_end, x_start:x_end]
@@ -1537,14 +1537,14 @@ class TEPProcessingService:
         is_3d = crop_info.get('is_3d', mask.ndim == 3)
         
         if is_3d and mask.ndim == 3:
-            # 3D: Keep all Z slices, crop Y and X
-            return mask[:, bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end']]
+            # 3D: Keep all Z slices, crop X and Y
+            return mask[bounds['x_start']:bounds['x_end'], bounds['y_start']:bounds['y_end'], :]
         elif mask.ndim == 2:
             # 2D: Crop Y and X directly
             return mask[bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end']]
         else:
-            # Fallback for unexpected cases
-            return mask[:, bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end']]
+            # Fallback for unexpected cases (assume 3D X, Y, Z)
+            return mask[bounds['x_start']:bounds['x_end'], bounds['y_start']:bounds['y_end'], :]
     
     def _expand_to_original(self, array, original_shape, crop_info):
         """Expand a cropped array back to original dimensions (zero-padded, dimension-aware)."""
@@ -1555,17 +1555,16 @@ class TEPProcessingService:
         
         # Handle different array dimensionalities
         if len(original_shape) == 4:
-            # 4D: RGBA heatmap (Z, Y, X, C) - crop was on Y, X
-            expanded[:, bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end'], :] = array
+            # 4D: RGBA heatmap (X, Y, Z, C) - crop was on X, Y
+            expanded[bounds['x_start']:bounds['x_end'], bounds['y_start']:bounds['y_end'], :, :] = array
         elif len(original_shape) == 3 and is_3d:
-            # 3D: Volume (Z, Y, X) - crop was on Y, X
-            expanded[:, bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end']] = array
+            # 3D: Volume (X, Y, Z) - crop was on X, Y
+            expanded[bounds['x_start']:bounds['x_end'], bounds['y_start']:bounds['y_end'], :] = array
         elif len(original_shape) == 2:
             # 2D: Single slice (Y, X)
             expanded[bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end']] = array
         else:
-            # Fallback: assume 3D behavior
-            expanded[:, bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end']] = array
+            expanded[bounds['x_start']:bounds['x_end'], bounds['y_start']:bounds['y_end'], :] = array
         
         return expanded
     
@@ -2042,7 +2041,7 @@ class TEPProcessingService:
         
         struct_3d = generate_binary_structure(3, 1)
         # Expand PA bounds to encapsulate the "dark holes" and occlusions
-        pa_dilated = binary_dilation(pa_mask, structure=struct_3d, iterations=8)
+        pa_dilated = binary_dilation(pa_mask, structure=struct_3d, iterations=3)
         
         # NEW: Lung Proximity Shield (Fast Slice-by-Slice)
         # Emboli happen in/near the lungs. The heart wall is too far from aerated lung.
@@ -2120,13 +2119,23 @@ class TEPProcessingService:
                 volumes = [volumes]
                 
             # Topological map of PA tree vicinity (5 iterations ~ 4-5mm reach for distal branches)
-            pa_vicinity = binary_dilation(pa_mask, iterations=5)
+            pa_vicinity = binary_dilation(pa_mask, iterations=3)
                 
             for i, (score, vol) in enumerate(zip(mean_scores, volumes)):
                 clot_pixels = (labeled_defects == (i + 1))
                 
                 # TOPOLOGICAL CHECK: Is this specific clot connected to the PA tree?
                 is_connected = np.any(clot_pixels & pa_vicinity)
+                
+                # AIR CONTAINMENT CHECK: If >50% of clot border touches air, it's NOT intravascular
+                is_air_surrounded = False
+                if is_connected:
+                    border = binary_dilation(clot_pixels, iterations=1) & ~clot_pixels
+                    if np.sum(border) > 0:
+                        air_fraction = np.sum(data[border] < -400) / np.sum(border)
+                        is_air_surrounded = air_fraction > 0.5
+                        if is_air_surrounded:
+                            is_connected = False  # Override: can't be intravascular if surrounded by air
                 
                 # SMALL VESSEL BYPASS WITH TOPOLOGY
                 if vol < 30.0:
@@ -2278,7 +2287,7 @@ class TEPProcessingService:
                     'id': idx + 1,
                     'volume': candidate_volume_mm3 / 1000.0,  # Convert mm³ → cm³
                     'volume_mm3': candidate_volume_mm3,
-                    'confidence': 'DEFINITE',
+                    'confidence': 'DEFINITE' if float(mean_score) >= self.SCORE_THRESHOLD_DEFINITE else 'SUSPICIOUS',
                     'predicted_recovery_fac': 0.5,
                     'fac_mean': rugosity['fac_mean'],
                     'mean_hu': hu_mean,
