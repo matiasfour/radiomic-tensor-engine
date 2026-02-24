@@ -48,9 +48,9 @@ class TEPProcessingService:
     
     # TEP-specific HU thresholds
     CONTRAST_BLOOD_RANGE = (150, 500)      # Contrast-enhanced arterial blood
-    THROMBUS_RANGE = (40, 100)             # Fresh thrombus (Raised min from 30→40 to exclude pericardial fat)
+    THROMBUS_RANGE = (15, 120)             # Unified: chronic (dark) to mixed (bright) thrombi
     PULMONARY_ARTERY_MIN_HU = 150          # Minimum HU for pulmonary artery (Lowered to 150 for peripheral vessels)
-    FILLING_DEFECT_MAX_HU = 100            # Maximum HU for filling defect
+    FILLING_DEFECT_MAX_HU = 120            # Maximum HU for filling defect (Raised for mixed thrombi)
     LUNG_PARENCHYMA_RANGE = (-900, -500)   # Lung tissue
     
     # ═══════════════════════════════════════════════════════════════════════════
@@ -120,8 +120,8 @@ class TEPProcessingService:
     LAPLACIAN_BONE_CHECK_RADIUS = 3        # Voxels to check around each detection
     LAPLACIAN_BONE_REJECT_RATIO = 0.30     # If >30% of border has bone gradient → discard
     
-    HEATMAP_HU_MIN = 40                    # Min HU for heatmap highlighting (Synced with THROMBUS_RANGE min)
-    HEATMAP_HU_MAX = 90                    # Max HU for heatmap highlighting
+    HEATMAP_HU_MIN = 15                    # Min HU for heatmap highlighting (Unified with all gates at 15)
+    HEATMAP_HU_MAX = 120                   # Max HU for heatmap highlighting (Synced with expanded THROMBUS_RANGE)
     CONTRAST_SUPPRESSION_HU = 250          # HU above which to suppress signal
     
     # ═══════════════════════════════════════════════════════════════════════════
@@ -2053,7 +2053,9 @@ class TEPProcessingService:
             lung_proximity[z] = binary_dilation(lung_core, iterations=15)
         
         # 2. Base Density Mask (Constrained to dilated PA AND Lung Proximity)
-        defect_mask = (data >= 30) & (data <= 100) & pa_dilated & lung_proximity
+        # Expanded range: 15 HU (chronic/dark thrombi) to 120 HU (mixed with contrast)
+        # Noise from 15-30 HU is controlled by topological PA-connectivity check downstream
+        defect_mask = (data >= 15) & (data <= 120) & pa_dilated & lung_proximity
         
         # 3 & 4. Anatomical Exclusions & Edge Removal (FAST SLICE-BY-SLICE)
         bone_mask = np.zeros_like(data, dtype=bool)
@@ -2117,8 +2119,8 @@ class TEPProcessingService:
                 mean_scores = [mean_scores]
                 volumes = [volumes]
                 
-            # NEW: Topological map of the PA tree vicinity (3 iterations ~ 2-3mm reach)
-            pa_vicinity = binary_dilation(pa_mask, iterations=3)
+            # Topological map of PA tree vicinity (5 iterations ~ 4-5mm reach for distal branches)
+            pa_vicinity = binary_dilation(pa_mask, iterations=5)
                 
             for i, (score, vol) in enumerate(zip(mean_scores, volumes)):
                 clot_pixels = (labeled_defects == (i + 1))
@@ -3007,7 +3009,7 @@ class TEPProcessingService:
         # Morphological cleanup
         pa_mask = binary_erosion(pa_mask, iterations=1)
         pa_mask = binary_dilation(pa_mask, iterations=1)
-        pa_mask = remove_small_objects(pa_mask, min_size=100)
+        pa_mask = remove_small_objects(pa_mask, min_size=20)  # Lowered: preserve distal peripheral vessels
         
         # Label connected components
         labeled_pa, num_features = label(pa_mask)
@@ -3078,8 +3080,8 @@ class TEPProcessingService:
         pa_dilated = binary_dilation(pa_mask, structure=struct, iterations=8)
         
         # Find low-HU regions within dilated PA (potential thrombi)
-        # Thrombus HU: typically 30-100 HU
-        potential_thrombi = pa_dilated & (data >= 30) & (data <= self.FILLING_DEFECT_MAX_HU)
+        # Expanded: 15 HU (chronic) to FILLING_DEFECT_MAX_HU (120, mixed)
+        potential_thrombi = pa_dilated & (data >= 15) & (data <= self.FILLING_DEFECT_MAX_HU)
         
         # Verify these regions are near high-contrast blood
         # by checking if they're adjacent to PA mask
@@ -3090,7 +3092,7 @@ class TEPProcessingService:
         thrombus_mask = potential_thrombi & near_contrast
         
         # Also include complete occlusions: regions within PA with low HU
-        complete_occlusion = pa_mask & (data >= 30) & (data <= self.FILLING_DEFECT_MAX_HU)
+        complete_occlusion = pa_mask & (data >= 15) & (data <= self.FILLING_DEFECT_MAX_HU)
         thrombus_mask = thrombus_mask | complete_occlusion
         
         # Remove very small regions (noise)
@@ -3370,10 +3372,9 @@ class TEPProcessingService:
         # Label 2: Soft Tissue (-100 to 30)
         lut_map[(data >= -100) & (data < 30)] = 2
         
-        # Label 3: Suspect Thrombus (30 to 100)
-        # Instead of strict domain_mask, we just allow all 30-100 HU to be red
-        # (This ensures human-visible clots ALWAYS show up as red in the heatmap)
-        thrombus_pixels = (data >= 30) & (data <= 100)
+        # Label 3: Suspect Thrombus (15 to 120 — expanded to match doctor's eye)
+        # Chronic/dark thrombi can be as low as 15 HU; mixed thrombi up to 120 HU
+        thrombus_pixels = (data >= 15) & (data <= 120)
         
         lut_map[thrombus_pixels] = 3
         
