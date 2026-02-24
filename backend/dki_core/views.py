@@ -1307,10 +1307,7 @@ class StudyViewSet(viewsets.ModelViewSet):
                 else:
                     continue
                 
-                # Rotate for correct orientation
-                img = img.transpose(Image.Transpose.ROTATE_90)
-                img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
-                
+                # Removed NIfTI rotation/flip to match DICOM 1:1 orientation                
                 # Resize for performance
                 orig_w, orig_h = img.size
                 if orig_w > max_size or orig_h > max_size:
@@ -1455,9 +1452,7 @@ class StudyViewSet(viewsets.ModelViewSet):
                     img_array = np.zeros_like(slice_data, dtype=np.uint8)
                 img = Image.fromarray(img_array, mode='L')
             
-            # Rotate if needed (NIfTI vs DICOM orientation)
-            img = img.transpose(Image.Transpose.ROTATE_90)
-            img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+            # Removed NIfTI rotation/flip to match DICOM 1:1 orientation
             
             # Save to bytes
             buffer = io.BytesIO()
