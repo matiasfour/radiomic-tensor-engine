@@ -1396,7 +1396,9 @@ class StudyViewSet(viewsets.ModelViewSet):
                 data = nii.get_fdata()
                 StudyViewSet._nifti_cache[map_path] = data
             
-            total_slices = data.shape[2] if len(data.shape) >= 3 else 1
+            # Global alignment: check if data is (Z, Y, X) and extract slices correctly
+            # We saved the TEPS arrays as (Z, Y, X)
+            total_slices = data.shape[0] if len(data.shape) >= 3 else 1
             
             if slice_index < 0 or slice_index >= total_slices:
                 return Response({
@@ -1406,8 +1408,8 @@ class StudyViewSet(viewsets.ModelViewSet):
             
             # Get the slice - handle 3D and 4D (RGB) data
             if len(data.shape) == 4:
-                # RGB data: shape is (x, y, z, 3)
-                slice_data = data[:, :, slice_index, :]
+                # RGB data: shape is (Z, Y, X, 3)
+                slice_data = data[slice_index, :, :, :]
                 # Normalize if needed
                 if slice_data.max() > 1.0:
                     img_array = np.clip(slice_data, 0, 255).astype(np.uint8)
@@ -1415,7 +1417,8 @@ class StudyViewSet(viewsets.ModelViewSet):
                     img_array = (slice_data * 255).astype(np.uint8)
                 img = Image.fromarray(img_array, mode='RGB')
             elif len(data.shape) >= 3:
-                slice_data = data[:, :, slice_index]
+                # Volume data: shape is (Z, Y, X)
+                slice_data = data[slice_index, :, :]
                 # Normalize to 0-255 for visualization
                 slice_data = np.nan_to_num(slice_data, nan=0)
                 
@@ -1512,7 +1515,8 @@ class StudyViewSet(viewsets.ModelViewSet):
         try:
             nii = nib.load(map_path)
             data = nii.get_fdata()
-            total_slices = data.shape[2] if len(data.shape) >= 3 else 1
+            # Saved as (Z, Y, X)
+            total_slices = data.shape[0] if len(data.shape) >= 3 else 1
             
             return Response({
                 'total_slices': total_slices,
