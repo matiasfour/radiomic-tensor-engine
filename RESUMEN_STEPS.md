@@ -33,7 +33,13 @@ Para aislar los pulmones del resto del cuerpo (brazos, camilla), MART aplica un 
 * Cifra un límite máximo de **350mm** para evitar incluir ruido periférico.
 Todo lo que exceda este límite desaparece de la memoria, acelerando el proceso.
 
-### 3. Filtro de Costillas y "Sternum Guard"
+### 3. Segmentación del Árbol Arterial Pulmonar (PA Mask)
+
+MART busca el contraste inyectado en la sangre. Para evitar puntos ciegos clínicos, utiliza dos mecanismos de rescate:
+* **Umbral Fotométrico Adaptativo:** No usa un valor fijo de 150 HU. MART mide la calidad real de la inyección del paciente. Si detecta un contraste pobre (ej. insuficiencia cardíaca o mal "bolus"), baja automáticamente su umbral de búsqueda (hasta 80 HU) para no volverse ciego ante vasos poco iluminados.
+* **Topología Relajada (Resistencia a Fragmentación):** En TEPs masivos, el flujo de contraste se corta abruptamente, dividiendo visualmente el árbol arterial en "islas" desconectadas. MART conserva los 25 fragmentos más grandes (bajando su tolerancia de tamaño a apenas 20 vóxeles) para asegurar que no se borren ramas periféricas vitales.
+
+### 4. Filtro de Costillas y "Sternum Guard"
 
 Los ganglios linfáticos hiliares o la grasa del corazón tienen la misma densidad que un trombo (15-120 HU). Para que MART no los confunda:
 

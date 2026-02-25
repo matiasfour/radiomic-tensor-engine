@@ -334,8 +334,18 @@ class TEPProcessingService:
         else:
              if log_callback:
                  log_callback("Step 4/9: Segmenting pulmonary arteries...")
-             pa_mask, pa_info = self._segment_pulmonary_arteries(working_data, lung_mask, log_callback)
-        
+             
+             # Phase 2 Adaptive Thresholding: If contrast is poor, we must lower the 150 HU bar.
+             # We use 45% of the measured mean arterial HU, but never go below 80 HU (muscle/blood baseline).
+             base_hu = getattr(self, 'mean_arterial_hu', 300)
+             dynamic_min_hu = max(80, int(base_hu * 0.45))
+             
+             pa_mask, pa_info = self._segment_pulmonary_arteries(
+                 working_data, 
+                 lung_mask, 
+                 dynamic_min_hu=dynamic_min_hu,
+                 log_callback=log_callback
+             )        
         # ═══════════════════════════════════════════════════════════════════════════
         # STEP 4.5: Extract vessel centerline for advanced analysis
         # ═══════════════════════════════════════════════════════════════════════════
@@ -421,22 +431,22 @@ class TEPProcessingService:
             
             for f in thrombus_info['voi_findings']:
                 # Verificar si el hallazgo todavía existe en la máscara limpia
-                cx, cy, cz = f['centroid']  # FIXED: centroid from (X,Y,Z) is (x,y,z)
-                x, y, z = int(cx), int(cy), int(cz)
+                cz, cy, cx = f['centroid']  # region.centroid or region.coords returns (Z, Y, X)
+                z, y, x = int(cz), int(cy), int(cx)
                 
                 # Chequeo de límites (Boundary check)
-                if (0 <= x < thrombus_mask.shape[0] and 
+                if (0 <= z < thrombus_mask.shape[0] and 
                     0 <= y < thrombus_mask.shape[1] and 
-                    0 <= z < thrombus_mask.shape[2]):
+                    0 <= x < thrombus_mask.shape[2]):
                     
                     # Verificamos si hay "algo" en la vecindad del centroide.
                     # Usamos una ventana de 3x3x3 por si el centroide cae en un hueco
                     # (ej. trombos con forma de 'C' o dona).
-                    x_min, x_max = max(0, x-1), min(x+2, thrombus_mask.shape[0])
+                    z_min, z_max = max(0, z-1), min(z+2, thrombus_mask.shape[0])
                     y_min, y_max = max(0, y-1), min(y+2, thrombus_mask.shape[1])
-                    z_min, z_max = max(0, z-1), min(z+2, thrombus_mask.shape[2])
+                    x_min, x_max = max(0, x-1), min(x+2, thrombus_mask.shape[2])
                     
-                    local_region = thrombus_mask[x_min:x_max, y_min:y_max, z_min:z_max]
+                    local_region = thrombus_mask[z_min:z_max, y_min:y_max, x_min:x_max]
                     
                     if np.any(local_region):
                         clean_findings.append(f)
@@ -587,9 +597,9 @@ class TEPProcessingService:
             if vol_mm3 < 5.0:
                 continue
             
-            # Centroid is (x, y, z) in numpy convention — from the CROPPED volume (X, Y, Z)
+            # Centroid is (Z, Y, X) numpy indices from the bounding box
             centroid = f.get('centroid', (0, 0, 0))
-            cx, cy, cz = float(centroid[0]), float(centroid[1]), float(centroid[2])
+            cz, cy, cx = float(centroid[0]), float(centroid[1]), float(centroid[2])
             
             # ── BOUNDARY GUARD ──
             clamped_z = max(0, min(int(cz), total_slices - 1))
@@ -2047,20 +2057,20 @@ class TEPProcessingService:
         
         pa_coords = np.argwhere(pa_mask)
         if pa_coords.size > 0:
-            # Get PA bounds in (X,Y,Z)
-            min_x, min_y, min_z = pa_coords.min(axis=0)
-            max_x, max_y, max_z = pa_coords.max(axis=0)
+            # Get PA bounds in (Z,Y,X)
+            min_z, min_y, min_x = pa_coords.min(axis=0)
+            max_z, max_y, max_x = pa_coords.max(axis=0)
             
             # Margin must handle vesselness gaussian windows (sigma=3 means ~9px radius)
             margin = 15
             
-            x_start, x_end = max(0, min_x - margin), min(data.shape[0], max_x + margin + 1)
+            z_start, z_end = max(0, min_z - margin), min(data.shape[0], max_z + margin + 1)
             y_start, y_end = max(0, min_y - margin), min(data.shape[1], max_y + margin + 1)
-            z_start, z_end = max(0, min_z - margin), min(data.shape[2], max_z + margin + 1)
+            x_start, x_end = max(0, min_x - margin), min(data.shape[2], max_x + margin + 1)
             
             # Extract small cuboid (~5-10% of total volume)
-            sub_data = data[x_start:x_end, y_start:y_end, z_start:z_end]
-            sub_pa_mask = pa_mask[x_start:x_end, y_start:y_end, z_start:z_end]
+            sub_data = data[z_start:z_end, y_start:y_end, x_start:x_end]
+            sub_pa_mask = pa_mask[z_start:z_end, y_start:y_end, x_start:x_end]
             
             if log_callback: 
                 v_orig = np.prod(data.shape)
@@ -2071,8 +2081,8 @@ class TEPProcessingService:
             # Fallback if pa_mask is entirely empty (should never happen here)
             sub_data = data
             sub_pa_mask = pa_mask
-            x_start, y_start, z_start = 0, 0, 0
-            x_end, y_end, z_end = data.shape
+            z_start, y_start, x_start = 0, 0, 0
+            z_end, y_end, x_end = data.shape
             
         # Initialize full-size arrays with zeros
         hodge_score = np.zeros_like(data, dtype=np.float32)
@@ -2082,14 +2092,14 @@ class TEPProcessingService:
         # ── HODGE SENSOR (LOCAL) ──
         try:
             sub_hodge = self._compute_hodge_features(sub_data, spacing)
-            hodge_score[x_start:x_end, y_start:y_end, z_start:z_end] = sub_hodge
+            hodge_score[z_start:z_end, y_start:y_end, x_start:x_end] = sub_hodge
         except Exception as e:
             if log_callback: log_callback(f"   ⚠️ Hodge sensor fallback (error: {e})")
             
         # ── RICCI SENSOR (LOCAL) ──
         try:
             sub_ricci = self._compute_forman_ricci_curvature(sub_data, sub_pa_mask, spacing)
-            ricci_score[x_start:x_end, y_start:y_end, z_start:z_end] = sub_ricci
+            ricci_score[z_start:z_end, y_start:y_end, x_start:x_end] = sub_ricci
         except Exception as e:
             if log_callback: log_callback(f"   ⚠️ Ricci sensor fallback (error: {e})")
             
@@ -2097,7 +2107,7 @@ class TEPProcessingService:
         if log_callback: log_callback("   🚀 Computing Multiscale Vesselness (Hessian Tube Sensor) on mini-cube...")
         try:
             sub_vmap, _, _, _ = self._compute_multiscale_vesselness(sub_data, spacing)
-            v_map[x_start:x_end, y_start:y_end, z_start:z_end] = sub_vmap
+            v_map[z_start:z_end, y_start:y_end, x_start:x_end] = sub_vmap
         except Exception as e:
             if log_callback: log_callback(f"   ⚠️ Vesselness sensor fallback (error: {e})")
 
@@ -2142,7 +2152,7 @@ class TEPProcessingService:
             
         defect_mask[bone_mask] = False
         defect_mask[lung_exclusion] = False
-        defect_mask[edges > 80] = False
+        defect_mask[edges > self.LAPLACIAN_GRADIENT_THRESHOLD] = False
         
         # 5. Morphological Cleanup (NO EROSION)
         defect_mask = binary_closing(defect_mask, iterations=1)
@@ -2262,13 +2272,27 @@ class TEPProcessingService:
                 if candidate_volume_mm3 < 5.0: 
                     continue
                 
+                # --- ANAOTOMICAL Z-GUARD (Apex/Neck False Positive Filter) ---
+                # Exclude findings in the very top slices IF the arterial tree is too thin there.
+                # (Prevents flagging neck veins or beam-hardening artifacts near the shoulders)
+                cz, cy, cx = region.centroid
+                candidate_z = int(cz)
+                
+                if candidate_z < self.Z_GUARD_MIN_SLICE:
+                    # Count PA voxels in this specific Z-slice
+                    pa_voxels_in_slice = np.sum(pa_mask[candidate_z])
+                    if pa_voxels_in_slice < self.Z_GUARD_MIN_PA_VOXELS:
+                        if log_callback:
+                            log_callback(f"   🛡️ Z-GUARD: Rejecting candidate at Z={candidate_z} (Apex). PA area = {pa_voxels_in_slice} voxels (< {self.Z_GUARD_MIN_PA_VOXELS})")
+                        continue
+                
                 # --- THE INFORMATION SANDWICH FIX ---
                 bbox = region.bbox
                 if len(bbox) == 6:
-                    x1, y1, z1, x2, y2, z2 = bbox  # regionprops follows array axes (X,Y,Z)
+                    z1, y1, x1, z2, y2, x2 = bbox  # regionprops follows array axes (Z,Y,X)
                 else: # Handle rare 2D bbox case
                     y1, x1, y2, x2 = bbox
-                    z1, z2 = 0, data.shape[2]      # Z is axis 2
+                    z1, z2 = 0, data.shape[0]      # Z is axis 0
 
                 # Check thickness. If flat (1 slice), add Padding (The Sandwich)
                 z_thickness = z2 - z1
@@ -2358,7 +2382,7 @@ class TEPProcessingService:
                 # Anchor the pin to the actual voxel with the highest score.
                 coords = region.coords
                 if len(coords) > 0:
-                    # coords are [x, y, z] indices in the cropped array
+                    # coords are [z, y, x] indices in the cropped array
                     scores_in_region = score_map[coords[:, 0], coords[:, 1], coords[:, 2]]
                     max_idx = np.argmax(scores_in_region)
                     best_coord = coords[max_idx]
@@ -3049,6 +3073,8 @@ class TEPProcessingService:
         
         if log_callback:
             log_callback(f"   Contrast enhancement: {quality} (mean arterial HU: {mean_hu:.0f})")
+            
+        self.mean_arterial_hu = float(mean_hu)
         
         return {
             'has_adequate_contrast': adequate,
@@ -3077,19 +3103,22 @@ class TEPProcessingService:
         
         return lung_mask
     
-    def _segment_pulmonary_arteries(self, data, lung_mask, log_callback=None):
+    def _segment_pulmonary_arteries(self, data, lung_mask, dynamic_min_hu=None, log_callback=None):
         """
         Segment pulmonary arteries based on contrast enhancement.
         
-        Strategy:
-        1. Find high-contrast voxels (>150 HU) near/within lung region
-        2. Use anatomical constraints (position, shape)
-        3. Separate main PA, left PA, right PA branches
+        Strategy (Enhanced):
+        1. Find high-contrast voxels (>dynamic_min_hu) near/within lung region.
+        2. Use anatomical constraints (position, shape).
+        3. Separate main PA, left PA, right PA branches, preserving distal fragments.
         """
-        # Initial contrast mask for arterial structures
-        pa_mask = (data >= self.PULMONARY_ARTERY_MIN_HU) & (data <= 500)
+        # Determine actual HU threshold based on contrast quality (or fallback to constant)
+        min_hu = dynamic_min_hu if dynamic_min_hu is not None else self.PULMONARY_ARTERY_MIN_HU
         
-        # Dilate lung mask to include hilar region
+        # Initial contrast mask for arterial structures
+        pa_mask = (data >= min_hu) & (data <= 500)
+        
+        # Dilate lung mask to include hilar region (The "Hilar Radar" trick)
         struct = generate_binary_structure(3, 2)
         lung_dilated = binary_dilation(lung_mask, structure=struct, iterations=10)
         
@@ -3100,12 +3129,12 @@ class TEPProcessingService:
         # Morphological cleanup
         pa_mask = binary_erosion(pa_mask, iterations=1)
         pa_mask = binary_dilation(pa_mask, iterations=1)
-        pa_mask = remove_small_objects(pa_mask, min_size=20)  # Lowered: preserve distal peripheral vessels
+        pa_mask = remove_small_objects(pa_mask, min_size=20)  # Preserve distal peripheral vessels
         
         # Label connected components
         labeled_pa, num_features = label(pa_mask)
         
-        # Find the largest connected components (main arteries)
+        # Find the largest connected components
         component_sizes = []
         for i in range(1, num_features + 1):
             size = np.sum(labeled_pa == i)
@@ -3114,23 +3143,25 @@ class TEPProcessingService:
         component_sizes.sort(key=lambda x: x[1], reverse=True)
         
         # Keep only the largest components (arterial tree)
-        # Typically the pulmonary artery is the largest vascular structure
+        # RELAXED RULES: In massive PE, the contrast stops, fragmenting the vascular tree.
+        # Keeping only top 10 erases peripheral branches. Expanding to top 25 and lowering min size.
         cleaned_pa_mask = np.zeros_like(pa_mask)
         total_kept = 0
-        for comp_id, size in component_sizes[:10]:  # Keep top 10 components
-            if size > 50:  # Minimum size threshold
+        for comp_id, size in component_sizes[:25]:  # Relaxed from Top 10 to Top 25
+            if size > 20:  # Relaxed from 50 to 20 voxels (~12mm^3) to catch distal fragments
                 cleaned_pa_mask[labeled_pa == comp_id] = True
                 total_kept += 1
         
         pa_info = {
             'total_components': num_features,
             'kept_components': total_kept,
+            'min_hu_used': min_hu,
             'main_pa_center': self._find_main_pa_center(cleaned_pa_mask, data),
         }
         
         if log_callback:
             pa_voxels = np.sum(cleaned_pa_mask)
-            log_callback(f"   Pulmonary arteries: {pa_voxels:,} voxels ({total_kept} main branches)")
+            log_callback(f"   Pulmonary arteries: {pa_voxels:,} voxels ({total_kept} branches, >= {min_hu} HU)")
         
         return cleaned_pa_mask, pa_info
     
