@@ -421,22 +421,22 @@ class TEPProcessingService:
             
             for f in thrombus_info['voi_findings']:
                 # Verificar si el hallazgo todavía existe en la máscara limpia
-                cz, cy, cx = f['centroid']
-                z, y, x = int(cz), int(cy), int(cx)
+                cx, cy, cz = f['centroid']  # FIXED: centroid from (X,Y,Z) is (x,y,z)
+                x, y, z = int(cx), int(cy), int(cz)
                 
                 # Chequeo de límites (Boundary check)
-                if (0 <= z < thrombus_mask.shape[0] and 
+                if (0 <= x < thrombus_mask.shape[0] and 
                     0 <= y < thrombus_mask.shape[1] and 
-                    0 <= x < thrombus_mask.shape[2]):
+                    0 <= z < thrombus_mask.shape[2]):
                     
                     # Verificamos si hay "algo" en la vecindad del centroide.
                     # Usamos una ventana de 3x3x3 por si el centroide cae en un hueco
                     # (ej. trombos con forma de 'C' o dona).
-                    z_min, z_max = max(0, z-1), min(z+2, thrombus_mask.shape[0])
+                    x_min, x_max = max(0, x-1), min(x+2, thrombus_mask.shape[0])
                     y_min, y_max = max(0, y-1), min(y+2, thrombus_mask.shape[1])
-                    x_min, x_max = max(0, x-1), min(x+2, thrombus_mask.shape[2])
+                    z_min, z_max = max(0, z-1), min(z+2, thrombus_mask.shape[2])
                     
-                    local_region = thrombus_mask[z_min:z_max, y_min:y_max, x_min:x_max]
+                    local_region = thrombus_mask[x_min:x_max, y_min:y_max, z_min:z_max]
                     
                     if np.any(local_region):
                         clean_findings.append(f)
@@ -615,6 +615,34 @@ class TEPProcessingService:
         
         if log_callback:
             log_callback(f"   📍 UX Metadata: {len(z_heatmap)} heatmap alert slices, {len(z_flow)} flow alert slices, {len(findings_pins)} diagnostic pins")
+            
+        # ════════════════════════════════════════════════════════════════════════
+        # DEBUG TRACER: PIN VS HEATMAP COHERENCE CHECK (THE LIE DETECTOR)
+        # ════════════════════════════════════════════════════════════════════════
+        if log_callback and findings_pins:
+            log_callback("  🔍 [SANITY CHECK] Verifying color underneath pins...")
+            mismatch_count = 0
+            for pin in findings_pins:
+                gx = pin['location']['coord_x']
+                gy = pin['location']['coord_y']
+                gz = pin['location']['slice_z']
+                
+                # Ensure within bounds
+                if 0 <= gx < data.shape[0] and 0 <= gy < data.shape[1] and 0 <= gz < data.shape[2]:
+                    # Extract RGB color from the full heatmap
+                    color = heatmap_full[gx, gy, gz]
+                    
+                    # Check if it's Red or Orange/Yellow (R > 150)
+                    is_colored = color[0] > 150
+                    
+                    if not is_colored:
+                        mismatch_count += 1
+                        log_callback(f"    ⚠️ PIN ALARM: Pin #{pin['id']} at (X:{gx}, Y:{gy}, Z:{gz}) lands on color RGB{list(color)} (NOT RED/YELLOW).")
+            
+            if mismatch_count == 0:
+                log_callback("    ✅ SUCCESS: All pins land precisely on colored heatmap pixels in the backend.")
+            else:
+                log_callback(f"    ❌ FAILED: {mismatch_count} pins placed on empty space. Check coordinate transformations.")
         
         # Final results
         results = {
@@ -1433,26 +1461,27 @@ class TEPProcessingService:
     # ═══════════════════════════════════════════════════════════════════════════
     def _crop_to_mediastinum(self, data, spacing, log_callback=None):
         """
-        Crop the volume to a 200mm x 200mm ROI centered on the mediastinum.
+        Hybrid Adaptive Crop: follows the patient's thorax silhouette with a safety cap.
         
         Strategy:
         1. Create a thoracic silhouette mask (soft tissue range)
-        2. Find center of mass of the silhouette
-        3. Apply 200mm x 200mm crop in the axial plane (Y, X axes)
+        2. Compute bounding box of the silhouette (adapts to patient size/position)
+        3. Cap the crop at MAX_CROP_MM (350mm) to exclude arms/table artifacts
+        4. Add 30px buffer for safety margin
         
         DIMENSION-AWARE: 
-        - 3D (Z, Y, X): Crop axes 1 and 2, preserve axis 0 (Z slices)
+        - 3D (X, Y, Z): Crop axes 0 and 1, preserve axis 2 (Z slices)
         - 2D (Y, X): Crop axes 0 and 1
         
-        This reduces peripheral noise (ribs, table) and optimizes compute.
+        This adapts to patient anatomy while preventing peripheral noise.
         """
-        crop_size_mm = self.MEDIASTINUM_CROP_MM
+        MAX_CROP_MM = 350.0  # Safety cap: prevents including arms/table
         
         # Create thoracic silhouette mask (soft tissue + lung combined)
         thorax_mask = (data > -900) & (data < 500)
         thorax_mask = binary_fill_holes(thorax_mask)
         
-        # Remove small disconnected regions
+        # Remove small disconnected regions (cables, positioning pads)
         thorax_mask = remove_small_objects(thorax_mask, min_size=10000)
         
         # Determine data dimensionality and axis indices
@@ -1460,48 +1489,57 @@ class TEPProcessingService:
         
         if is_3d:
             # 3D: shape is (X, Y, Z) - crop X and Y (axes 0 and 1)
-            y_axis, x_axis = 1, 0
             shape_y, shape_x = data.shape[1], data.shape[0]
             spacing_y = spacing[1] if len(spacing) > 1 else 1.0
             spacing_x = spacing[0] if len(spacing) > 0 else 1.0
         else:
             # 2D: shape is (Y, X) - crop both axes
-            y_axis, x_axis = 0, 1
             shape_y, shape_x = data.shape[0], data.shape[1]
             spacing_y = spacing[0] if len(spacing) > 0 else 1.0
             spacing_x = spacing[1] if len(spacing) > 1 else 1.0
         
-        # Find center of mass of thoracic silhouette
-        if np.sum(thorax_mask) > 0:
-            com = center_of_mass(thorax_mask.astype(float))
+        buffer = 30  # Safety padding in pixels
+        
+        # ── HYBRID ADAPTIVE CROP: Bounding box of thorax + safety cap ──
+        coords = np.argwhere(thorax_mask)
+        
+        if coords.size > 0:
             if is_3d:
-                center_y = int(com[1])  # Y is axis 1
-                center_x = int(com[0])  # X is axis 0
+                # coords columns are (X, Y, Z) for 3D
+                x_min_raw, y_min_raw = int(coords[:, 0].min()), int(coords[:, 1].min())
+                x_max_raw, y_max_raw = int(coords[:, 0].max()), int(coords[:, 1].max())
             else:
-                center_y = int(com[0])
-                center_x = int(com[1])
+                # coords columns are (Y, X) for 2D
+                y_min_raw, x_min_raw = int(coords[:, 0].min()), int(coords[:, 1].min())
+                y_max_raw, x_max_raw = int(coords[:, 0].max()), int(coords[:, 1].max())
+            
+            # Apply buffer
+            x_start = max(0, x_min_raw - buffer)
+            x_end = min(shape_x, x_max_raw + buffer)
+            y_start = max(0, y_min_raw - buffer)
+            y_end = min(shape_y, y_max_raw + buffer)
+            
+            # SAFETY CAP: Don't let the crop exceed MAX_CROP_MM (prevents arm/table inclusion)
+            max_crop_px_x = int(MAX_CROP_MM / spacing_x)
+            max_crop_px_y = int(MAX_CROP_MM / spacing_y)
+            
+            if (x_end - x_start) > max_crop_px_x:
+                center_x = (x_start + x_end) // 2
+                x_start = max(0, center_x - max_crop_px_x // 2)
+                x_end = min(shape_x, center_x + max_crop_px_x // 2)
+            
+            if (y_end - y_start) > max_crop_px_y:
+                center_y = (y_start + y_end) // 2
+                y_start = max(0, center_y - max_crop_px_y // 2)
+                y_end = min(shape_y, center_y + max_crop_px_y // 2)
         else:
-            # Fallback to geometric center
-            center_y = shape_y // 2
-            center_x = shape_x // 2
+            # Fallback: no crop at all
+            x_start, x_end = 0, shape_x
+            y_start, y_end = 0, shape_y
         
-        # Calculate crop dimensions in voxels
-        crop_voxels_y = int(crop_size_mm / spacing_y)
-        crop_voxels_x = int(crop_size_mm / spacing_x)
-        
-        # Ensure crop fits within data bounds
-        crop_voxels_y = min(crop_voxels_y, shape_y)
-        crop_voxels_x = min(crop_voxels_x, shape_x)
-        
-        # Calculate crop bounds (with 30px peripheral buffer to avoid clipping border clots)
-        buffer = 30
-        half_y = crop_voxels_y // 2
-        half_x = crop_voxels_x // 2
-        
-        y_start = max(0, center_y - half_y - buffer)
-        y_end = min(shape_y, center_y + half_y + buffer)
-        x_start = max(0, center_x - half_x - buffer)
-        x_end = min(shape_x, center_x + half_x + buffer)
+        # Calculate effective crop size in mm for logging
+        effective_crop_x_mm = (x_end - x_start) * spacing_x
+        effective_crop_y_mm = (y_end - y_start) * spacing_y
         
         # Apply crop based on dimensionality
         if is_3d:
@@ -1512,22 +1550,21 @@ class TEPProcessingService:
             data_cropped = data[y_start:y_end, x_start:x_end]
         
         crop_info = {
-            'center_of_mass': (center_y, center_x),
+            'center_of_mass': ((y_start + y_end) // 2, (x_start + x_end) // 2),
             'crop_bounds': {
                 'y_start': y_start, 'y_end': y_end,
                 'x_start': x_start, 'x_end': x_end,
             },
             'original_shape': data.shape,
             'cropped_shape': data_cropped.shape,
-            'crop_size_mm': crop_size_mm,
-            'crop_voxels': (crop_voxels_y, crop_voxels_x),
+            'crop_size_mm': max(effective_crop_x_mm, effective_crop_y_mm),
+            'crop_voxels': (y_end - y_start, x_end - x_start),
             'is_3d': is_3d,
         }
         
         if log_callback:
-            log_callback(f"   Center of mass: ({center_y}, {center_x})")
-            log_callback(f"   Crop: {data.shape} → {data_cropped.shape}")
-            log_callback(f"   ROI size: {crop_size_mm}mm × {crop_size_mm}mm")
+            log_callback(f"   Adaptive crop: {data.shape} → {data_cropped.shape}")
+            log_callback(f"   ROI size: {effective_crop_x_mm:.0f}mm × {effective_crop_y_mm:.0f}mm (cap: {MAX_CROP_MM:.0f}mm)")
         
         return data_cropped, crop_info
     
@@ -2197,10 +2234,10 @@ class TEPProcessingService:
                 # --- THE INFORMATION SANDWICH FIX ---
                 bbox = region.bbox
                 if len(bbox) == 6:
-                    z1, y1, x1, z2, y2, x2 = bbox
+                    x1, y1, z1, x2, y2, z2 = bbox  # regionprops follows array axes (X,Y,Z)
                 else: # Handle rare 2D bbox case
                     y1, x1, y2, x2 = bbox
-                    z1, z2 = 0, data.shape[0]
+                    z1, z2 = 0, data.shape[2]      # Z is axis 2
 
                 # Check thickness. If flat (1 slice), add Padding (The Sandwich)
                 z_thickness = z2 - z1
@@ -2283,6 +2320,20 @@ class TEPProcessingService:
                 if 45 <= hu_mean <= 85:
                     mean_score += 0.5
                 
+                # ════════════════════════════════════════════════════════════════════
+                
+                # ── SMART PIN ANCHORING (Donut Effect Fix) ──
+                # Thrombi can be C-shaped, meaning mathematical centroid falls in empty space.
+                # Anchor the pin to the actual voxel with the highest score.
+                coords = region.coords
+                if len(coords) > 0:
+                    # coords are [x, y, z] indices in the cropped array
+                    scores_in_region = score_map[coords[:, 0], coords[:, 1], coords[:, 2]]
+                    max_idx = np.argmax(scores_in_region)
+                    best_coord = coords[max_idx]
+                else:
+                    best_coord = region.centroid
+                
                 voi_findings.append({
                     'id': idx + 1,
                     'volume': candidate_volume_mm3 / 1000.0,  # Convert mm³ → cm³
@@ -2292,7 +2343,7 @@ class TEPProcessingService:
                     'fac_mean': rugosity['fac_mean'],
                     'mean_hu': hu_mean,
                     'score_mean': float(mean_score),
-                    'centroid': region.centroid,
+                    'centroid': best_coord,
                     'slice_range': (z1, z2)
                 })
             except IndexError as ie:
