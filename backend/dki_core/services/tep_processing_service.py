@@ -130,12 +130,12 @@ class TEPProcessingService:
     def _ensure_3d(self, array):
         """
         DIMENSIONAL IRON DOME:
-        Forces (Z, Y, X) layout. If input is (H, W), expands to (1, H, W).
+        Forces (X, Y, Z) layout. If input is (H, W), expands to (H, W, 1).
         This prevents crashes when Numpy implicitly squeezes single-slice volumes.
         """
         if array is None: return None
         if array.ndim == 2: 
-            return array[np.newaxis, ...]
+            return array[..., np.newaxis]
         return array
 
     def process_study(self, data, affine, kvp=None, mas=None, spacing=None, log_callback=None,
@@ -431,22 +431,22 @@ class TEPProcessingService:
             
             for f in thrombus_info['voi_findings']:
                 # Verificar si el hallazgo todavía existe en la máscara limpia
-                cz, cy, cx = f['centroid']  # region.centroid or region.coords returns (Z, Y, X)
-                z, y, x = int(cz), int(cy), int(cx)
+                cx, cy, cz = f['centroid']  # region.centroid or region.coords returns (X, Y, Z)
+                x, y, z = int(cx), int(cy), int(cz)
                 
                 # Chequeo de límites (Boundary check)
-                if (0 <= z < thrombus_mask.shape[0] and 
+                if (0 <= x < thrombus_mask.shape[0] and 
                     0 <= y < thrombus_mask.shape[1] and 
-                    0 <= x < thrombus_mask.shape[2]):
+                    0 <= z < thrombus_mask.shape[2]):
                     
                     # Verificamos si hay "algo" en la vecindad del centroide.
                     # Usamos una ventana de 3x3x3 por si el centroide cae en un hueco
                     # (ej. trombos con forma de 'C' o dona).
-                    z_min, z_max = max(0, z-1), min(z+2, thrombus_mask.shape[0])
+                    x_min, x_max = max(0, x-1), min(x+2, thrombus_mask.shape[0])
                     y_min, y_max = max(0, y-1), min(y+2, thrombus_mask.shape[1])
-                    x_min, x_max = max(0, x-1), min(x+2, thrombus_mask.shape[2])
+                    z_min, z_max = max(0, z-1), min(z+2, thrombus_mask.shape[2])
                     
-                    local_region = thrombus_mask[z_min:z_max, y_min:y_max, x_min:x_max]
+                    local_region = thrombus_mask[x_min:x_max, y_min:y_max, z_min:z_max]
                     
                     if np.any(local_region):
                         clean_findings.append(f)
@@ -597,9 +597,9 @@ class TEPProcessingService:
             if vol_mm3 < 5.0:
                 continue
             
-            # Centroid is (Z, Y, X) numpy indices from the bounding box
+            # Centroid is (X, Y, Z) numpy indices from the bounding box
             centroid = f.get('centroid', (0, 0, 0))
-            cz, cy, cx = float(centroid[0]), float(centroid[1]), float(centroid[2])
+            cx, cy, cz = float(centroid[0]), float(centroid[1]), float(centroid[2])
             
             # ── BOUNDARY GUARD ──
             clamped_z = max(0, min(int(cz), total_slices - 1))
@@ -2057,20 +2057,20 @@ class TEPProcessingService:
         
         pa_coords = np.argwhere(pa_mask)
         if pa_coords.size > 0:
-            # Get PA bounds in (Z,Y,X)
-            min_z, min_y, min_x = pa_coords.min(axis=0)
-            max_z, max_y, max_x = pa_coords.max(axis=0)
+            # Get PA bounds in (X,Y,Z)
+            min_x, min_y, min_z = pa_coords.min(axis=0)
+            max_x, max_y, max_z = pa_coords.max(axis=0)
             
             # Margin must handle vesselness gaussian windows (sigma=3 means ~9px radius)
             margin = 15
             
-            z_start, z_end = max(0, min_z - margin), min(data.shape[0], max_z + margin + 1)
+            x_start, x_end = max(0, min_x - margin), min(data.shape[0], max_x + margin + 1)
             y_start, y_end = max(0, min_y - margin), min(data.shape[1], max_y + margin + 1)
-            x_start, x_end = max(0, min_x - margin), min(data.shape[2], max_x + margin + 1)
+            z_start, z_end = max(0, min_z - margin), min(data.shape[2], max_z + margin + 1)
             
             # Extract small cuboid (~5-10% of total volume)
-            sub_data = data[z_start:z_end, y_start:y_end, x_start:x_end]
-            sub_pa_mask = pa_mask[z_start:z_end, y_start:y_end, x_start:x_end]
+            sub_data = data[x_start:x_end, y_start:y_end, z_start:z_end]
+            sub_pa_mask = pa_mask[x_start:x_end, y_start:y_end, z_start:z_end]
             
             if log_callback: 
                 v_orig = np.prod(data.shape)
@@ -2081,8 +2081,8 @@ class TEPProcessingService:
             # Fallback if pa_mask is entirely empty (should never happen here)
             sub_data = data
             sub_pa_mask = pa_mask
-            z_start, y_start, x_start = 0, 0, 0
-            z_end, y_end, x_end = data.shape
+            x_start, y_start, z_start = 0, 0, 0
+            x_end, y_end, z_end = data.shape
             
         # Initialize full-size arrays with zeros
         hodge_score = np.zeros_like(data, dtype=np.float32)
@@ -2092,14 +2092,14 @@ class TEPProcessingService:
         # ── HODGE SENSOR (LOCAL) ──
         try:
             sub_hodge = self._compute_hodge_features(sub_data, spacing)
-            hodge_score[z_start:z_end, y_start:y_end, x_start:x_end] = sub_hodge
+            hodge_score[x_start:x_end, y_start:y_end, z_start:z_end] = sub_hodge
         except Exception as e:
             if log_callback: log_callback(f"   ⚠️ Hodge sensor fallback (error: {e})")
             
         # ── RICCI SENSOR (LOCAL) ──
         try:
             sub_ricci = self._compute_forman_ricci_curvature(sub_data, sub_pa_mask, spacing)
-            ricci_score[z_start:z_end, y_start:y_end, x_start:x_end] = sub_ricci
+            ricci_score[x_start:x_end, y_start:y_end, z_start:z_end] = sub_ricci
         except Exception as e:
             if log_callback: log_callback(f"   ⚠️ Ricci sensor fallback (error: {e})")
             
@@ -2107,7 +2107,7 @@ class TEPProcessingService:
         if log_callback: log_callback("   🚀 Computing Multiscale Vesselness (Hessian Tube Sensor) on mini-cube...")
         try:
             sub_vmap, _, _, _ = self._compute_multiscale_vesselness(sub_data, spacing)
-            v_map[z_start:z_end, y_start:y_end, x_start:x_end] = sub_vmap
+            v_map[x_start:x_end, y_start:y_end, z_start:z_end] = sub_vmap
         except Exception as e:
             if log_callback: log_callback(f"   ⚠️ Vesselness sensor fallback (error: {e})")
 
@@ -2275,12 +2275,12 @@ class TEPProcessingService:
                 # --- ANAOTOMICAL Z-GUARD (Apex/Neck False Positive Filter) ---
                 # Exclude findings in the very top slices IF the arterial tree is too thin there.
                 # (Prevents flagging neck veins or beam-hardening artifacts near the shoulders)
-                cz, cy, cx = region.centroid
+                cx, cy, cz = region.centroid
                 candidate_z = int(cz)
                 
                 if candidate_z < self.Z_GUARD_MIN_SLICE:
-                    # Count PA voxels in this specific Z-slice
-                    pa_voxels_in_slice = np.sum(pa_mask[candidate_z])
+                    # Count PA voxels in this specific Z-slice (Axis 2)
+                    pa_voxels_in_slice = np.sum(pa_mask[:, :, candidate_z])
                     if pa_voxels_in_slice < self.Z_GUARD_MIN_PA_VOXELS:
                         if log_callback:
                             log_callback(f"   🛡️ Z-GUARD: Rejecting candidate at Z={candidate_z} (Apex). PA area = {pa_voxels_in_slice} voxels (< {self.Z_GUARD_MIN_PA_VOXELS})")
@@ -2289,28 +2289,28 @@ class TEPProcessingService:
                 # --- THE INFORMATION SANDWICH FIX ---
                 bbox = region.bbox
                 if len(bbox) == 6:
-                    z1, y1, x1, z2, y2, x2 = bbox  # regionprops follows array axes (Z,Y,X)
+                    x1, y1, z1, x2, y2, z2 = bbox  # regionprops follows array axes (X,Y,Z)
                 else: # Handle rare 2D bbox case
                     y1, x1, y2, x2 = bbox
-                    z1, z2 = 0, data.shape[0]      # Z is axis 0
+                    z1, z2 = 0, data.shape[2]      # Z is axis 2
 
                 # Check thickness. If flat (1 slice), add Padding (The Sandwich)
                 z_thickness = z2 - z1
-                if z_thickness <= 1 and data.shape[0] > 5:
+                if z_thickness <= 1 and data.shape[2] > 5:
                     # Expand context: 1 slice above, 1 slice below
                     z_start_pad = max(0, z1 - 1)
-                    z_end_pad = min(data.shape[0], z2 + 1)
+                    z_end_pad = min(data.shape[2], z2 + 1)
                     
                     # Crop with context for physics calculation
-                    voi_data_for_physics = data[z_start_pad:z_end_pad, y1:y2, x1:x2]
+                    voi_data_for_physics = data[x1:x2, y1:y2, z_start_pad:z_end_pad]
                     
                     # Pad the mask to match the physics crop
                     pad_top = z1 - z_start_pad
                     pad_bottom = z_end_pad - z2
                     mask_original = self._ensure_3d(region.image)
-                    voi_mask_for_physics = np.pad(mask_original, ((pad_top, pad_bottom), (0,0), (0,0)), mode='constant')
+                    voi_mask_for_physics = np.pad(mask_original, ((0,0), (0,0), (pad_top, pad_bottom)), mode='constant')
                 else:
-                    voi_data_for_physics = data[z1:z2, y1:y2, x1:x2]
+                    voi_data_for_physics = data[x1:x2, y1:y2, z1:z2]
                     voi_mask_for_physics = self._ensure_3d(region.image)
                 
                 # Run Physics on Padded/Sandwiched Data
@@ -2319,7 +2319,7 @@ class TEPProcessingService:
                 if rugosity['is_airway']: continue 
                 
                 # --- SAFE ASSIGNMENT (Fixes IndexError) ---
-                target_slice = thresholded_mask[z1:z2, y1:y2, x1:x2]
+                target_slice = thresholded_mask[x1:x2, y1:y2, z1:z2]
                 mask_to_write = self._ensure_3d(region.image)
                 
                 # Explicitly reshape mask to fit target (Fixes implicit squeeze mismatch)
@@ -2333,7 +2333,7 @@ class TEPProcessingService:
                 mean_score = 0.0
                 try:
                     # 1. Get raw crop
-                    voi_score_crop = score_map[z1:z2, y1:y2, x1:x2]
+                    voi_score_crop = score_map[x1:x2, y1:y2, z1:z2]
                     mask_for_score = region.image
 
                     # 2. Dimensionality Alignment (The "Square Peg" Fix)
