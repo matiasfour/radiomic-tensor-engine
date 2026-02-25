@@ -1433,26 +1433,27 @@ class TEPProcessingService:
     # ═══════════════════════════════════════════════════════════════════════════
     def _crop_to_mediastinum(self, data, spacing, log_callback=None):
         """
-        Crop the volume to a 200mm x 200mm ROI centered on the mediastinum.
+        Hybrid Adaptive Crop: follows the patient's thorax silhouette with a safety cap.
         
         Strategy:
         1. Create a thoracic silhouette mask (soft tissue range)
-        2. Find center of mass of the silhouette
-        3. Apply 200mm x 200mm crop in the axial plane (Y, X axes)
+        2. Compute bounding box of the silhouette (adapts to patient size/position)
+        3. Cap the crop at MAX_CROP_MM (350mm) to exclude arms/table artifacts
+        4. Add 30px buffer for safety margin
         
         DIMENSION-AWARE: 
-        - 3D (Z, Y, X): Crop axes 1 and 2, preserve axis 0 (Z slices)
+        - 3D (X, Y, Z): Crop axes 0 and 1, preserve axis 2 (Z slices)
         - 2D (Y, X): Crop axes 0 and 1
         
-        This reduces peripheral noise (ribs, table) and optimizes compute.
+        This adapts to patient anatomy while preventing peripheral noise.
         """
-        crop_size_mm = self.MEDIASTINUM_CROP_MM
+        MAX_CROP_MM = 350.0  # Safety cap: prevents including arms/table
         
         # Create thoracic silhouette mask (soft tissue + lung combined)
         thorax_mask = (data > -900) & (data < 500)
         thorax_mask = binary_fill_holes(thorax_mask)
         
-        # Remove small disconnected regions
+        # Remove small disconnected regions (cables, positioning pads)
         thorax_mask = remove_small_objects(thorax_mask, min_size=10000)
         
         # Determine data dimensionality and axis indices
@@ -1460,48 +1461,57 @@ class TEPProcessingService:
         
         if is_3d:
             # 3D: shape is (X, Y, Z) - crop X and Y (axes 0 and 1)
-            y_axis, x_axis = 1, 0
             shape_y, shape_x = data.shape[1], data.shape[0]
             spacing_y = spacing[1] if len(spacing) > 1 else 1.0
             spacing_x = spacing[0] if len(spacing) > 0 else 1.0
         else:
             # 2D: shape is (Y, X) - crop both axes
-            y_axis, x_axis = 0, 1
             shape_y, shape_x = data.shape[0], data.shape[1]
             spacing_y = spacing[0] if len(spacing) > 0 else 1.0
             spacing_x = spacing[1] if len(spacing) > 1 else 1.0
         
-        # Find center of mass of thoracic silhouette
-        if np.sum(thorax_mask) > 0:
-            com = center_of_mass(thorax_mask.astype(float))
+        buffer = 30  # Safety padding in pixels
+        
+        # ── HYBRID ADAPTIVE CROP: Bounding box of thorax + safety cap ──
+        coords = np.argwhere(thorax_mask)
+        
+        if coords.size > 0:
             if is_3d:
-                center_y = int(com[1])  # Y is axis 1
-                center_x = int(com[0])  # X is axis 0
+                # coords columns are (X, Y, Z) for 3D
+                x_min_raw, y_min_raw = int(coords[:, 0].min()), int(coords[:, 1].min())
+                x_max_raw, y_max_raw = int(coords[:, 0].max()), int(coords[:, 1].max())
             else:
-                center_y = int(com[0])
-                center_x = int(com[1])
+                # coords columns are (Y, X) for 2D
+                y_min_raw, x_min_raw = int(coords[:, 0].min()), int(coords[:, 1].min())
+                y_max_raw, x_max_raw = int(coords[:, 0].max()), int(coords[:, 1].max())
+            
+            # Apply buffer
+            x_start = max(0, x_min_raw - buffer)
+            x_end = min(shape_x, x_max_raw + buffer)
+            y_start = max(0, y_min_raw - buffer)
+            y_end = min(shape_y, y_max_raw + buffer)
+            
+            # SAFETY CAP: Don't let the crop exceed MAX_CROP_MM (prevents arm/table inclusion)
+            max_crop_px_x = int(MAX_CROP_MM / spacing_x)
+            max_crop_px_y = int(MAX_CROP_MM / spacing_y)
+            
+            if (x_end - x_start) > max_crop_px_x:
+                center_x = (x_start + x_end) // 2
+                x_start = max(0, center_x - max_crop_px_x // 2)
+                x_end = min(shape_x, center_x + max_crop_px_x // 2)
+            
+            if (y_end - y_start) > max_crop_px_y:
+                center_y = (y_start + y_end) // 2
+                y_start = max(0, center_y - max_crop_px_y // 2)
+                y_end = min(shape_y, center_y + max_crop_px_y // 2)
         else:
-            # Fallback to geometric center
-            center_y = shape_y // 2
-            center_x = shape_x // 2
+            # Fallback: no crop at all
+            x_start, x_end = 0, shape_x
+            y_start, y_end = 0, shape_y
         
-        # Calculate crop dimensions in voxels
-        crop_voxels_y = int(crop_size_mm / spacing_y)
-        crop_voxels_x = int(crop_size_mm / spacing_x)
-        
-        # Ensure crop fits within data bounds
-        crop_voxels_y = min(crop_voxels_y, shape_y)
-        crop_voxels_x = min(crop_voxels_x, shape_x)
-        
-        # Calculate crop bounds (with 30px peripheral buffer to avoid clipping border clots)
-        buffer = 30
-        half_y = crop_voxels_y // 2
-        half_x = crop_voxels_x // 2
-        
-        y_start = max(0, center_y - half_y - buffer)
-        y_end = min(shape_y, center_y + half_y + buffer)
-        x_start = max(0, center_x - half_x - buffer)
-        x_end = min(shape_x, center_x + half_x + buffer)
+        # Calculate effective crop size in mm for logging
+        effective_crop_x_mm = (x_end - x_start) * spacing_x
+        effective_crop_y_mm = (y_end - y_start) * spacing_y
         
         # Apply crop based on dimensionality
         if is_3d:
@@ -1512,22 +1522,21 @@ class TEPProcessingService:
             data_cropped = data[y_start:y_end, x_start:x_end]
         
         crop_info = {
-            'center_of_mass': (center_y, center_x),
+            'center_of_mass': ((y_start + y_end) // 2, (x_start + x_end) // 2),
             'crop_bounds': {
                 'y_start': y_start, 'y_end': y_end,
                 'x_start': x_start, 'x_end': x_end,
             },
             'original_shape': data.shape,
             'cropped_shape': data_cropped.shape,
-            'crop_size_mm': crop_size_mm,
-            'crop_voxels': (crop_voxels_y, crop_voxels_x),
+            'crop_size_mm': max(effective_crop_x_mm, effective_crop_y_mm),
+            'crop_voxels': (y_end - y_start, x_end - x_start),
             'is_3d': is_3d,
         }
         
         if log_callback:
-            log_callback(f"   Center of mass: ({center_y}, {center_x})")
-            log_callback(f"   Crop: {data.shape} → {data_cropped.shape}")
-            log_callback(f"   ROI size: {crop_size_mm}mm × {crop_size_mm}mm")
+            log_callback(f"   Adaptive crop: {data.shape} → {data_cropped.shape}")
+            log_callback(f"   ROI size: {effective_crop_x_mm:.0f}mm × {effective_crop_y_mm:.0f}mm (cap: {MAX_CROP_MM:.0f}mm)")
         
         return data_cropped, crop_info
     
