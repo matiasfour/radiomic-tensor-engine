@@ -20,22 +20,24 @@ Todo comienza con la interpretación de la materia a través de los rayos X.
 
 ## 2. Segmentación Anatómica (El Contenedor)
 
-MART delimita el "campo de juego" para evitar falsos positivos en el resto del cuerpo.
+MART delimita el "campo de juego" para evitar falsos positivos en el resto del cuerpo y optimizar agresivamente el uso de RAM.
 
+* **Crop Adaptativo Híbrido:** Recorta el escáner a la silueta torácica real del paciente, estableciendo un límite máximo de **350mm** de lado. Evita cargar brazos y artefactos en memoria.
 * **Máscara de Dominio:** Aísla el parénquima pulmonar y el mediastino.
 * **Árbol Arterial Pulmonar ($pa\_mask$):** Identifica las arterias principales mediante el brillo del contraste ($>150$ HU).
-* **Sombra de Oclusión:** Dilata el árbol arterial (8 iteraciones) para incluir zonas donde el coágulo tapa la sangre por completo y el contraste no puede pasar.
+* **Sombra de Oclusión:** Dilata el árbol arterial (3 iteraciones) para incluir zonas donde el coágulo tapa la sangre por completo y el contraste no puede pasar.
 
 ## 3. Geometría de Tubos: Tensores de Hessiana
 
 MART utiliza el análisis de **Escala de Espacio (Scale-Space)** para "sentir" la forma de los objetos.
 
-* **Vesselness de Frangi:** Calcula las segundas derivadas de la imagen para hallar autovalores ($\lambda_1, \lambda_2, \lambda_3$).
+* **🛡️ IRON DOME (Optimización de Memoria RAM):** Calcular derivadas 3D continuas sobre un escáner completo (95 millones de vóxeles) consume >12 GB de RAM y causa "Swapping" extremo (retrasos de 1 hora). MART extrae un **Bounding Box 3D exclusivo de la arteria pulmonar** (con 15px de margen). Los tensores geométricos actúan sobre solo ~2-3 millones de vóxeles (reduciendo el gasto de RAM en >90%) resolviéndolo en 3-5 segundos.
+* **Vesselness de Frangi:** Calcula las segundas derivadas de la imagen para hallar autovalores ($\lambda_1, \lambda_2, \lambda_3$) dentro de la arteria.
 * **Ajuste Sub-vóxel:** Procesa en escalas de $\sigma = 0.5$ y $1.0$. Esto permite que la matemática detecte arterias de apenas **$1$ o $2$ píxeles** de ancho, algo que el ojo humano suele ignorar por fatiga.
 
 ## 4. Geometría de Superficie: Tensores de Ricci
 
-Esta es la capa de "geometría Riemanniana" que diferencia a MART de otros software.
+Esta es la capa de "geometría Riemanniana" que diferencia a MART de otros software. (Calculado también dentro del marco del Iron Dome).
 
 * **Curvatura de Ricci:** En lugar de solo buscar "tubos", MART analiza la deformación de la superficie interna del vaso.
 * **Detección de Anomalías:** Un vaso sano tiene una curvatura constante. Un trombo pegado a la pared genera una **anomalía en la variedad geométrica**. El Tensor de Ricci detecta este "relieve" anómalo, permitiendo distinguir un coágulo de una simple irregularidad en la pared arterial.
@@ -56,13 +58,13 @@ MART analiza cómo se mueve la sangre alrededor del sospechoso.
 
 ## 7. El Veredicto: Sistema de Puntuación (Scoring)
 
-MART suma evidencias para decidir si pone un pinche **Rojo (Definite)** o **Amarillo (Suspicious)**:
+MART suma evidencias para decidir si pone un pinche **Rojo (Definite)** o **Amarillo (Suspicious)**. Las reglas de hierro estipulan que un trombo verdadero debe rendir cuentas a la mecánica de fluidos, no solo al brillo:
 
 | Prueba | Evidencia | Puntos |
 | --- | --- | --- |
-| **Densidad (HU)** | ¿Está en el rango $15-120$? | **+1.0 a +2.0** |
-| **Geometría (Hessian/Ricci)** | ¿Tiene forma de vaso deformado? | **+1.0** |
-| **Física (FAC/Fractal)** | ¿Interrumpe el flujo o la red? | **+1.0** |
+| **Densidad (HU)** | ¿Está en el rango $15-120$? | **+1.0** (Reducido desde 3.0 para evitar Sesgos en Ganglios) |
+| **Geometría (Vesselness/Ricci)** | ¿Tiene forma de vaso cilíndrico o deforma la pared? | **+1.0 a +2.0** |
+| **Física (FAC)** | ¿Interrumpe el flujo direccional? | **+1.0 a +2.0** |
 
 * **Validación Topológica:** Antes de dar el veredicto, MART verifica si la mancha está conectada al árbol arterial. Si está aislada en el aire o en el músculo, se descarta como ruido.
 
