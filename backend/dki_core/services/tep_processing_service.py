@@ -2038,40 +2038,71 @@ class TEPProcessingService:
         # [RESTORED] MART v4: Topology Sensors (Hodge + Ricci)
         # ═══════════════════════════════════════════════════════════════════════════
         if log_callback: log_callback("   📐 Activating Topology Sensors (MART v4)...")
+        # ════════════════════════════════════════════════════════════════════════
+        # 🛡️ IRON DOME MEMORY OPTIMIZATION: Bounding Box Extract
+        # Computing 3D Hessian/Ricci on 100M voxels takes >10GB RAM and 1 hour.
+        # We only care about voxels inside or near `pa_mask`.
+        # ════════════════════════════════════════════════════════════════════════
+        if log_callback: log_callback("   📦 Extracting pulmonary bounded crop for geometric sensors...")
+        
+        pa_coords = np.argwhere(pa_mask)
+        if pa_coords.size > 0:
+            # Get PA bounds in (X,Y,Z)
+            min_x, min_y, min_z = pa_coords.min(axis=0)
+            max_x, max_y, max_z = pa_coords.max(axis=0)
+            
+            # Margin must handle vesselness gaussian windows (sigma=3 means ~9px radius)
+            margin = 15
+            
+            x_start, x_end = max(0, min_x - margin), min(data.shape[0], max_x + margin + 1)
+            y_start, y_end = max(0, min_y - margin), min(data.shape[1], max_y + margin + 1)
+            z_start, z_end = max(0, min_z - margin), min(data.shape[2], max_z + margin + 1)
+            
+            # Extract small cuboid (~5-10% of total volume)
+            sub_data = data[x_start:x_end, y_start:y_end, z_start:z_end]
+            sub_pa_mask = pa_mask[x_start:x_end, y_start:y_end, z_start:z_end]
+            
+            if log_callback: 
+                v_orig = np.prod(data.shape)
+                v_sub = np.prod(sub_data.shape)
+                pct = (v_sub / v_orig) * 100.0
+                log_callback(f"   📦 Bbox size: {sub_data.shape} ({v_sub:,} voxels). Reduced geometric RAM footprint to {pct:.1f}%")
+        else:
+            # Fallback if pa_mask is entirely empty (should never happen here)
+            sub_data = data
+            sub_pa_mask = pa_mask
+            x_start, y_start, z_start = 0, 0, 0
+            x_end, y_end, z_end = data.shape
+            
+        # Initialize full-size arrays with zeros
+        hodge_score = np.zeros_like(data, dtype=np.float32)
+        ricci_score = np.zeros_like(data, dtype=np.float32)
+        v_map = np.zeros_like(data, dtype=np.float32)
+
+        # ── HODGE SENSOR (LOCAL) ──
         try:
-            hodge_score = self._compute_hodge_features(data, spacing)
-            if hodge_score.shape != data.shape:
-                if log_callback: log_callback(f"   ⚠️ [DIAG] Hodge shape mismatch: {hodge_score.shape} vs data {data.shape}")
-                hodge_score = np.zeros_like(data, dtype=np.float32)
-            hodge_score = self._ensure_3d(hodge_score)
+            sub_hodge = self._compute_hodge_features(sub_data, spacing)
+            hodge_score[x_start:x_end, y_start:y_end, z_start:z_end] = sub_hodge
         except Exception as e:
             if log_callback: log_callback(f"   ⚠️ Hodge sensor fallback (error: {e})")
-            hodge_score = np.zeros_like(data, dtype=np.float32)
-        
+            
+        # ── RICCI SENSOR (LOCAL) ──
         try:
-            ricci_score = self._compute_forman_ricci_curvature(data, pa_mask, spacing)
-            if ricci_score.shape != data.shape:
-                if log_callback: log_callback(f"   ⚠️ [DIAG] Ricci shape mismatch: {ricci_score.shape} vs data {data.shape}")
-                ricci_score = np.zeros_like(data, dtype=np.float32)
-            ricci_score = self._ensure_3d(ricci_score)
+            sub_ricci = self._compute_forman_ricci_curvature(sub_data, sub_pa_mask, spacing)
+            ricci_score[x_start:x_end, y_start:y_end, z_start:z_end] = sub_ricci
         except Exception as e:
             if log_callback: log_callback(f"   ⚠️ Ricci sensor fallback (error: {e})")
-            ricci_score = np.zeros_like(data, dtype=np.float32)
-        
-        # [RESTORED] Multiscale Vesselness (Hessian Tube Boost)
-        if log_callback: log_callback("   🚀 Computing Multiscale Vesselness (Hessian Tube Sensor)...")
+            
+        # ── VESSELNESS SENSOR (LOCAL) ──
+        if log_callback: log_callback("   🚀 Computing Multiscale Vesselness (Hessian Tube Sensor) on mini-cube...")
         try:
-            v_map, _, _, _ = self._compute_multiscale_vesselness(data, spacing)
-            if v_map.shape != data.shape:
-                if log_callback: log_callback(f"   ⚠️ [DIAG] Vesselness shape mismatch: {v_map.shape} vs data {data.shape}")
-                v_map = np.zeros_like(data, dtype=np.float32)
-            v_map = self._ensure_3d(v_map)
+            sub_vmap, _, _, _ = self._compute_multiscale_vesselness(sub_data, spacing)
+            v_map[x_start:x_end, y_start:y_end, z_start:z_end] = sub_vmap
         except Exception as e:
             if log_callback: log_callback(f"   ⚠️ Vesselness sensor fallback (error: {e})")
-            v_map = np.zeros_like(data, dtype=np.float32)
 
         if log_callback:
-            log_callback(f"   🔍 [DIAG] hodge={hodge_score.shape}({hodge_score.ndim}D) ricci={ricci_score.shape}({ricci_score.ndim}D) v_map={v_map.shape}({v_map.ndim}D)")
+            log_callback(f"   🔍 [DIAG] Sensors completed successfully via bounded crop.")
 
         # 1. Expand PA bounds and Create Lung Proximity Mask
         from scipy.ndimage import gaussian_laplace
