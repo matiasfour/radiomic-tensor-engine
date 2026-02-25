@@ -1,7 +1,7 @@
 import numpy as np
 import logging
 from scipy.ndimage import label, binary_erosion, binary_dilation, uniform_filter, sobel
-from scipy.ndimage import generate_binary_structure, binary_fill_holes, center_of_mass, binary_closing
+from scipy.ndimage import generate_binary_structure, binary_fill_holes, center_of_mass, binary_closing, iterate_structure
 from scipy.ndimage import gaussian_filter, distance_transform_edt
 from skimage.measure import regionprops, label as sk_label
 from skimage.morphology import remove_small_objects, remove_small_holes, skeletonize
@@ -1131,7 +1131,7 @@ class TEPProcessingService:
             'periodicity_score': periodicity_score if 'periodicity_score' in locals() else 0.0
         }
         
-    def _compute_multiscale_vesselness(self, data, spacing, sigma_range=(1.0, 3.0)):
+    def _compute_multiscale_vesselness(self, data, spacing, mask=None, sigma_range=(1.0, 3.0)):
         """
         TASK 1: Centralized Hessian & Eigenvalue Logic (Multiscale).
         Computes Frangi-like vesselness and returns sorted eigenvalues.
@@ -1168,6 +1168,13 @@ class TEPProcessingService:
             
             l1_last, l2_last, l3_last = l1, l2, l3
             
+            # OPTIMIZATION: Mask out empty space before heavy math
+            if mask is not None:
+                mask_bool = mask > 0
+                l1 = l1[mask_bool]
+                l2 = l2[mask_bool]
+                l3 = l3[mask_bool]
+            
             # Frangi parameters
             alpha = 0.5
             beta = 0.5
@@ -1187,7 +1194,12 @@ class TEPProcessingService:
             condition = (l2 < 0) & (l3 < 0)
             vess_scale[~condition] = 0
             
-            vesselness_max = np.maximum(vesselness_max, vess_scale)
+            if mask is not None:
+                vess_full = np.zeros_like(data, dtype=np.float32)
+                vess_full[mask_bool] = vess_scale
+                vesselness_max = np.maximum(vesselness_max, vess_full)
+            else:
+                vesselness_max = np.maximum(vesselness_max, vess_scale)
             
         # Handle NaNs
         vesselness = np.nan_to_num(vesselness_max)
@@ -1785,7 +1797,7 @@ class TEPProcessingService:
             dilation_voxels = 4  # Relaxed from 8
         
         struct = generate_binary_structure(ndim, 1)
-        bone_exclusion = binary_dilation(bone_mask, structure=struct, iterations=dilation_voxels)
+        bone_exclusion = binary_dilation(bone_mask, structure=iterate_structure(struct, dilation_voxels), iterations=1)
         
         if log_callback:
             log_callback(f"   🦴 Bone exclusion: {np.sum(bone_mask):,} bone voxels + {dilation_mm}mm dilation = {np.sum(bone_exclusion):,} excluded")
@@ -1793,7 +1805,7 @@ class TEPProcessingService:
         # ═══════════════════════════════════════════════════════════════════════════
         # STEP 1: Create analysis ROI (PA dilated MINUS bone exclusion)
         # ═══════════════════════════════════════════════════════════════════════════
-        roi_mask = binary_dilation(pa_mask_proc, structure=struct, iterations=3)
+        roi_mask = binary_dilation(pa_mask_proc, structure=iterate_structure(struct, 3), iterations=1)
         roi_mask = roi_mask & ~bone_exclusion
         
         # 1. Compute Gradients (dimension-aware)
@@ -2106,7 +2118,7 @@ class TEPProcessingService:
         # ── VESSELNESS SENSOR (LOCAL) ──
         if log_callback: log_callback("   🚀 Computing Multiscale Vesselness (Hessian Tube Sensor) on mini-cube...")
         try:
-            sub_vmap, _, _, _ = self._compute_multiscale_vesselness(sub_data, spacing)
+            sub_vmap, _, _, _ = self._compute_multiscale_vesselness(sub_data, spacing, mask=sub_pa_mask)
             v_map[x_start:x_end, y_start:y_end, z_start:z_end] = sub_vmap
         except Exception as e:
             if log_callback: log_callback(f"   ⚠️ Vesselness sensor fallback (error: {e})")
@@ -2121,34 +2133,26 @@ class TEPProcessingService:
         # Expand PA bounds to encapsulate the "dark holes" and occlusions
         pa_dilated = binary_dilation(pa_mask, structure=struct_3d, iterations=3)
         
-        # NEW: Lung Proximity Shield (Fast Slice-by-Slice)
+        # NEW: Lung Proximity Shield (Vectorized 3D O(N) EDT)
         # Emboli happen in/near the lungs. The heart wall is too far from aerated lung.
-        lung_proximity = np.zeros_like(data, dtype=bool)
-        for z in range(data.shape[0]):
-            lung_core = data[z] < -400  # Aerated lung tissue
-            # Dilate ~15 pixels (approx 10-15mm) to cover hilar vessels but exclude anterior heart
-            lung_proximity[z] = binary_dilation(lung_core, iterations=15)
+        lung_core = data < -400  # Aerated lung tissue
+        # Use Distance Transform for blazingly fast 3D dilation (~15 pixels)
+        lung_proximity = distance_transform_edt(~lung_core) <= 15
         
         # 2. Base Density Mask (Constrained to dilated PA AND Lung Proximity)
         # Expanded range: 15 HU (chronic/dark thrombi) to 120 HU (mixed with contrast)
         # Noise from 15-30 HU is controlled by topological PA-connectivity check downstream
         defect_mask = (data >= 15) & (data <= 120) & pa_dilated & lung_proximity
         
-        # 3 & 4. Anatomical Exclusions & Edge Removal (FAST SLICE-BY-SLICE)
-        bone_mask = np.zeros_like(data, dtype=bool)
-        lung_exclusion = np.zeros_like(data, dtype=bool)
-        edges = np.zeros_like(data, dtype=np.float32)
+        # 3 & 4. Anatomical Exclusions & Edge Removal (Vectorized 3D O(N))
+        bone_core = data > 400
+        bone_mask = distance_transform_edt(~bone_core) <= 4
         
-        # Process slice by slice to avoid 3D convolution CPU hangs
-        for z in range(data.shape[0]):
-            slice_data = data[z]
-            
-            # Fast 2D dilations
-            bone_mask[z] = binary_dilation(slice_data > 400, iterations=4)
-            lung_exclusion[z] = binary_dilation(slice_data < -400, iterations=2)
-            
-            # Fast 2D Laplacian
-            edges[z] = gaussian_laplace(slice_data.astype(np.float32), sigma=1.0)
+        lung_excl_core = data < -400
+        lung_exclusion = distance_transform_edt(~lung_excl_core) <= 2
+        
+        # Fast Separable 3D Laplacian (O(N) via FFT/Convolution separable pass)
+        edges = gaussian_laplace(data.astype(np.float32), sigma=1.0)
             
         defect_mask[bone_mask] = False
         defect_mask[lung_exclusion] = False
@@ -3120,7 +3124,10 @@ class TEPProcessingService:
         
         # Dilate lung mask to include hilar region (The "Hilar Radar" trick)
         struct = generate_binary_structure(3, 2)
-        lung_dilated = binary_dilation(lung_mask, structure=struct, iterations=10)
+        
+        # FAST O(1) MORPHOLOGY:
+        large_struct = iterate_structure(struct, 10)
+        lung_dilated = binary_dilation(lung_mask, structure=large_struct, iterations=1)
         
         # Pulmonary arteries should be near/within dilated lung region
         # but not in the lung parenchyma itself (which is low HU)
@@ -3199,7 +3206,7 @@ class TEPProcessingService:
         # Dilate PA mask to include filling defects that might be
         # completely occluding the lumen
         struct = generate_binary_structure(3, 1)
-        pa_dilated = binary_dilation(pa_mask, structure=struct, iterations=8)
+        pa_dilated = binary_dilation(pa_mask, structure=iterate_structure(struct, 8), iterations=1)
         
         # Find low-HU regions within dilated PA (potential thrombi)
         # Expanded: 15 HU (chronic) to FILLING_DEFECT_MAX_HU (120, mixed)
