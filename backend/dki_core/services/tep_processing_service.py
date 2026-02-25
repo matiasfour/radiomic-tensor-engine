@@ -421,22 +421,22 @@ class TEPProcessingService:
             
             for f in thrombus_info['voi_findings']:
                 # Verificar si el hallazgo todavía existe en la máscara limpia
-                cz, cy, cx = f['centroid']
-                z, y, x = int(cz), int(cy), int(cx)
+                cx, cy, cz = f['centroid']  # FIXED: centroid from (X,Y,Z) is (x,y,z)
+                x, y, z = int(cx), int(cy), int(cz)
                 
                 # Chequeo de límites (Boundary check)
-                if (0 <= z < thrombus_mask.shape[0] and 
+                if (0 <= x < thrombus_mask.shape[0] and 
                     0 <= y < thrombus_mask.shape[1] and 
-                    0 <= x < thrombus_mask.shape[2]):
+                    0 <= z < thrombus_mask.shape[2]):
                     
                     # Verificamos si hay "algo" en la vecindad del centroide.
                     # Usamos una ventana de 3x3x3 por si el centroide cae en un hueco
                     # (ej. trombos con forma de 'C' o dona).
-                    z_min, z_max = max(0, z-1), min(z+2, thrombus_mask.shape[0])
+                    x_min, x_max = max(0, x-1), min(x+2, thrombus_mask.shape[0])
                     y_min, y_max = max(0, y-1), min(y+2, thrombus_mask.shape[1])
-                    x_min, x_max = max(0, x-1), min(x+2, thrombus_mask.shape[2])
+                    z_min, z_max = max(0, z-1), min(z+2, thrombus_mask.shape[2])
                     
-                    local_region = thrombus_mask[z_min:z_max, y_min:y_max, x_min:x_max]
+                    local_region = thrombus_mask[x_min:x_max, y_min:y_max, z_min:z_max]
                     
                     if np.any(local_region):
                         clean_findings.append(f)
@@ -615,6 +615,34 @@ class TEPProcessingService:
         
         if log_callback:
             log_callback(f"   📍 UX Metadata: {len(z_heatmap)} heatmap alert slices, {len(z_flow)} flow alert slices, {len(findings_pins)} diagnostic pins")
+            
+        # ════════════════════════════════════════════════════════════════════════
+        # DEBUG TRACER: PIN VS HEATMAP COHERENCE CHECK (THE LIE DETECTOR)
+        # ════════════════════════════════════════════════════════════════════════
+        if log_callback and findings_pins:
+            log_callback("  🔍 [SANITY CHECK] Verifying color underneath pins...")
+            mismatch_count = 0
+            for pin in findings_pins:
+                gx = pin['location']['coord_x']
+                gy = pin['location']['coord_y']
+                gz = pin['location']['slice_z']
+                
+                # Ensure within bounds
+                if 0 <= gx < data.shape[0] and 0 <= gy < data.shape[1] and 0 <= gz < data.shape[2]:
+                    # Extract RGB color from the full heatmap
+                    color = heatmap_full[gx, gy, gz]
+                    
+                    # Check if it's Red or Orange/Yellow (R > 150)
+                    is_colored = color[0] > 150
+                    
+                    if not is_colored:
+                        mismatch_count += 1
+                        log_callback(f"    ⚠️ PIN ALARM: Pin #{pin['id']} at (X:{gx}, Y:{gy}, Z:{gz}) lands on color RGB{list(color)} (NOT RED/YELLOW).")
+            
+            if mismatch_count == 0:
+                log_callback("    ✅ SUCCESS: All pins land precisely on colored heatmap pixels in the backend.")
+            else:
+                log_callback(f"    ❌ FAILED: {mismatch_count} pins placed on empty space. Check coordinate transformations.")
         
         # Final results
         results = {
@@ -2206,10 +2234,10 @@ class TEPProcessingService:
                 # --- THE INFORMATION SANDWICH FIX ---
                 bbox = region.bbox
                 if len(bbox) == 6:
-                    z1, y1, x1, z2, y2, x2 = bbox
+                    x1, y1, z1, x2, y2, z2 = bbox  # regionprops follows array axes (X,Y,Z)
                 else: # Handle rare 2D bbox case
                     y1, x1, y2, x2 = bbox
-                    z1, z2 = 0, data.shape[0]
+                    z1, z2 = 0, data.shape[2]      # Z is axis 2
 
                 # Check thickness. If flat (1 slice), add Padding (The Sandwich)
                 z_thickness = z2 - z1
@@ -2292,6 +2320,20 @@ class TEPProcessingService:
                 if 45 <= hu_mean <= 85:
                     mean_score += 0.5
                 
+                # ════════════════════════════════════════════════════════════════════
+                
+                # ── SMART PIN ANCHORING (Donut Effect Fix) ──
+                # Thrombi can be C-shaped, meaning mathematical centroid falls in empty space.
+                # Anchor the pin to the actual voxel with the highest score.
+                coords = region.coords
+                if len(coords) > 0:
+                    # coords are [x, y, z] indices in the cropped array
+                    scores_in_region = score_map[coords[:, 0], coords[:, 1], coords[:, 2]]
+                    max_idx = np.argmax(scores_in_region)
+                    best_coord = coords[max_idx]
+                else:
+                    best_coord = region.centroid
+                
                 voi_findings.append({
                     'id': idx + 1,
                     'volume': candidate_volume_mm3 / 1000.0,  # Convert mm³ → cm³
@@ -2301,7 +2343,7 @@ class TEPProcessingService:
                     'fac_mean': rugosity['fac_mean'],
                     'mean_hu': hu_mean,
                     'score_mean': float(mean_score),
-                    'centroid': region.centroid,
+                    'centroid': best_coord,
                     'slice_range': (z1, z2)
                 })
             except IndexError as ie:
