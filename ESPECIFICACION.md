@@ -24,7 +24,7 @@ MART delimita el "campo de juego" para evitar falsos positivos en el resto del c
 
 * **Crop Adaptativo Híbrido:** Recorta el escáner a la silueta torácica real del paciente, estableciendo un límite máximo de **350mm** de lado. Evita cargar brazos y artefactos en memoria.
 * **Máscara de Dominio:** Aísla el parénquima pulmonar y el mediastino.
-* **Árbol Arterial Pulmonar ($pa\_mask$):** Identifica las arterias principales mediante el brillo del contraste ($>150$ HU).
+* **Árbol Arterial Pulmonar ($pa\_mask$):** Identifica las arterias principales mediante el brillo del contraste. Utiliza un **Umbral Fotométrico Adaptativo** (analiza la calidad del bolus en el paciente; si es malo, baja el umbral de 150 a $\sim80$ HU para no perder vasos sutiles) y **Topología Relajada** (escala al Top-25 de componentes para evitar que un TEP masivo "fragmente" y borre ramas distales desconectadas).
 * **Sombra de Oclusión:** Dilata el árbol arterial (3 iteraciones) para incluir zonas donde el coágulo tapa la sangre por completo y el contraste no puede pasar.
 
 ## 3. Geometría de Tubos: Tensores de Hessiana
