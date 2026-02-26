@@ -80,7 +80,7 @@ class TEPProcessingService:
     SCORE_MK_POINTS = 1                    # MK criterion contributes 1 point
     SCORE_FAC_POINTS = 1                   # FAC criterion contributes 1 point
     SCORE_THRESHOLD_SUSPICIOUS = 2         # Score >= 2 = suspicious (yellow/orange)
-    SCORE_THRESHOLD_DEFINITE = 3.0         # Score >= 3.0 = definite thrombus (requires 3/4 evidence channels)
+    SCORE_THRESHOLD_DEFINITE = 2.5         # Score >= 2.5 = definite thrombus (requires 3/4 evidence channels)
     
     # ═══════════════════════════════════════════════════════════════════════════
     # CONTRAST INHIBITOR: Pixels with HU > this threshold get Score = 0
@@ -2247,7 +2247,7 @@ class TEPProcessingService:
         # 5. Morphological Cleanup (NO EROSION)
         defect_mask = binary_closing(defect_mask, iterations=1)
         defect_mask = binary_fill_holes(defect_mask)
-        defect_mask = remove_small_objects(defect_mask, min_size=5)
+        defect_mask = remove_small_objects(defect_mask, min_size=3)
         
         if log_callback:
             self._log_tensor_stats("06_Cleaned_Candidates_Mask", defect_mask, log_callback)
@@ -2337,9 +2337,9 @@ class TEPProcessingService:
                             is_connected = False  # Override: can't be intravascular if surrounded by air
                 
                 # SMALL VESSEL BYPASS WITH TOPOLOGY
-                if vol < 30.0:
+                if vol < 15.0:  # Relaxed from 30.0 mm3 to recover subvisual emboli
                     if score >= 2.0 and is_connected:
-                        score = 3.0  # Safe to promote: it's a real distal branch micro-clot
+                        score = 2.5  # Safe to promote: it's a real distal branch micro-clot
                     elif not is_connected:
                         score = 0.0  # SUPPRESS: Isolated noise/artifact in the parenchyma
                         
@@ -2508,12 +2508,19 @@ class TEPProcessingService:
                 # Anchor the pin to the actual voxel with the highest score.
                 coords = region.coords
                 if len(coords) > 0:
-                    # coords are [z, y, x] indices in the cropped array
+                    # coords are [z, y, x] local indices in the bounding box
                     scores_in_region = score_map[coords[:, 0], coords[:, 1], coords[:, 2]]
                     max_idx = np.argmax(scores_in_region)
-                    best_coord = coords[max_idx]
+                    best_coord_local = coords[max_idx]
                 else:
-                    best_coord = region.centroid
+                    best_coord_local = region.centroid
+                    
+                # Translate from BBox local coordinates to the Cropped-Data coordinate space!
+                best_coord = (
+                    best_coord_local[0] + z1,
+                    best_coord_local[1] + y1,
+                    best_coord_local[2] + x1
+                )
                 
                 voi_findings.append({
                     'id': idx + 1,
