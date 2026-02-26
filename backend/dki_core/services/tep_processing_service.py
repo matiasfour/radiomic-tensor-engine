@@ -202,43 +202,22 @@ class TEPProcessingService:
         warnings_list = []
         
         # ═══════════════════════════════════════════════════════════════════════════
-        # MASTER FIX: GLOBAL GEOMETRIC UNIFICATION (Z, Y, X)
+        # FIX 1: Force 3D context - expand 2D inputs to (1, H, W)
         # ═══════════════════════════════════════════════════════════════════════════
-        # nibabel loads data as (X, Y, Z), but SciPy/ImageProcessing math tensors 
-        # (Frangi, Ricci, Morphology) expect (Z, Y, X).
-        # We enforce (Z, Y, X) right at the entrypoint to cure the 'Geometric Scizophrenia'.
-        
-        is_transposed = False
-        if data.ndim == 3:
-            # Check if likely (X,Y,Z). Medical images usually have Z as the smallest dimension.
-            # If so, transpose to (Z, Y, X)
-            if data.shape[2] < data.shape[0] and data.shape[2] < data.shape[1]:
-                if log_callback: log_callback("   🔄 ALIGNMENT: Transposing NIfTI (X,Y,Z) to Pipeline (Z,Y,X) standards.")
-                data = np.transpose(data, (2, 1, 0))
-                is_transposed = True
-                
-                # Transpose the domain mask as well if it exists
-                if domain_mask is not None:
-                    domain_mask = np.transpose(domain_mask, (2, 1, 0))
-        elif data.ndim == 2:
-            logger.warning("⚠️ Data is 2D. Forced expansion to 3D volume (1, Y, X).")
+        if data.ndim == 2:
+            logger.warning("⚠️ Data is 2D. Forced expansion to 3D volume.")
             if log_callback:
-                log_callback("⚠️ Data is 2D. Forced expansion to 3D volume (1, Y, X).")
-            data = data[np.newaxis, :, :]  # (H, W) -> (Z=1, Y, X)
+                log_callback("⚠️ Data is 2D. Forced expansion to 3D volume.")
+            data = data[np.newaxis, :, :]  # (H, W) -> (1, H, W)
         
         # Extract voxel dimensions
         if spacing is None:
-            spacing = np.sqrt(np.sum(affine[:3, :3]**2, axis=0)) # This is (X, Y, Z)
+            spacing = np.sqrt(np.sum(affine[:3, :3]**2, axis=0))
         
         # Ensure spacing matches data dimensionality (3D)
         if len(spacing) == 2:
-            spacing = np.array([1.0, spacing[1], spacing[0]])  # Prepend Z
-        elif len(spacing) == 3:
-            if is_transposed:
-                spacing = np.array([spacing[2], spacing[1], spacing[0]]) # Transpose to Z, Y, X
-            else:
-                 pass
-        else:
+            spacing = np.array([1.0, spacing[0], spacing[1]])  # Prepend dummy Z-spacing
+        elif len(spacing) != 3:
             spacing = np.array([1.0, 1.0, 1.0])  # Fallback
         
         voxel_volume_mm3 = np.prod(spacing)
@@ -276,6 +255,7 @@ class TEPProcessingService:
         # Use cropped data for analysis
         working_data = data_cropped
         working_exclusion = exclusion_mask_cropped
+        self._log_tensor_stats("00_Data_Cropped", working_data, log_callback)
         
         # ═══════════════════════════════════════════════════════════════════════════
         # STEP 2: Verify contrast enhancement (NON-BLOCKING)
@@ -341,6 +321,8 @@ class TEPProcessingService:
         # Check if study requires manual review (ROI too small after erosion)
         if erosion_info.get('requires_manual_review', False):
             warnings_list.append(f"ROI reduced to {erosion_info['reduction_percentage']:.1f}% - REQUIRES_MANUAL_REVIEW")
+            
+        self._log_tensor_stats("01_Lung_Mask", lung_mask, log_callback)
         
         # ═══════════════════════════════════════════════════════════════════════════
         # STEP 4: Segment pulmonary arteries
@@ -366,14 +348,19 @@ class TEPProcessingService:
                  lung_mask, 
                  dynamic_min_hu=dynamic_min_hu,
                  log_callback=log_callback
-             )        
+             )
+        
+        self._log_tensor_stats("02_PA_Mask", pa_mask, log_callback)
+         
         # ═══════════════════════════════════════════════════════════════════════════
         # STEP 4.5: Extract vessel centerline for advanced analysis
         # ═══════════════════════════════════════════════════════════════════════════
         if log_callback:
             log_callback("Step 4.5/9: Extracting vessel centerline (skeletonize)...")
         
-        centerline, centerline_info = self._extract_vessel_centerline(pa_mask, working_data, log_callback)
+        centerline, centerline_info = self._extract_vessel_centerline(
+            pa_mask, working_data, spacing=spacing, log_callback=log_callback
+        )
         
         # ═══════════════════════════════════════════════════════════════════════════
         # STEP 5: Calculate local kurtosis (MK) map
@@ -582,7 +569,7 @@ class TEPProcessingService:
         # UX METADATA GENERATION (Smart Scrollbar & Diagnostic Pins)
         # ════════════════════════════════════════════════════════════════════════
         
-        total_slices = int(data.shape[0])  # Original volume Z count (data is Z, Y, X)
+        total_slices = int(data.shape[2])  # Original volume Z count (data is X, Y, Z)
         
         # 1. Smart Navigator Data (Active Slices)
         # Use the EXPANDED (full-size) masks so indices match total_slices
@@ -618,9 +605,9 @@ class TEPProcessingService:
             if vol_mm3 < 5.0:
                 continue
             
-            # Centroid is (Z, Y, X) numpy indices from the bounding box
+            # Centroid is (X, Y, Z) numpy indices from the bounding box
             centroid = f.get('centroid', (0, 0, 0))
-            cz, cy, cx = float(centroid[0]), float(centroid[1]), float(centroid[2])
+            cx, cy, cz = float(centroid[0]), float(centroid[1]), float(centroid[2])
             
             # ── BOUNDARY GUARD ──
             clamped_z = max(0, min(int(cz), total_slices - 1))
@@ -659,9 +646,9 @@ class TEPProcessingService:
                 gz = pin['location']['slice_z']
                 
                 # Ensure within bounds
-                if 0 <= gz < data.shape[0] and 0 <= gy < data.shape[1] and 0 <= gx < data.shape[2]:
+                if 0 <= gx < data.shape[0] and 0 <= gy < data.shape[1] and 0 <= gz < data.shape[2]:
                     # Extract RGB color from the full heatmap
-                    color = heatmap_full[gz, gy, gx]
+                    color = heatmap_full[gx, gy, gz]
                     
                     # Check if it's Red or Orange/Yellow (R > 150)
                     is_colored = color[0] > 150
@@ -835,7 +822,50 @@ class TEPProcessingService:
                 if log_callback:
                     log_callback(f"  ⚠️ Warning: Ground truth validation failed: {str(e)}", level='WARNING')
         
+        # Free memory aggressively inside loop
+        del working_data, lung_mask, pa_mask, heatmap, heatmap_full
+        import gc
+        gc.collect()
+
         return results
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MATHEMATICAL TELEMETRY HELPER (PHASE 7)
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    def _log_tensor_stats(self, name, tensor_array, log_callback=None):
+        """
+        Phase 7: Extracts mathematical telemetry from a numpy array (Shape, Sparsity, Min, Max, Mean)
+        and prints it to the console to audit geometric operations without file I/O overhead.
+        """
+        if not log_callback or tensor_array is None:
+            return
+            
+        try:
+            shape = tensor_array.shape
+            dtype = tensor_array.dtype
+            
+            # Mask characteristics (Booleans & integers)
+            if tensor_array.dtype == bool or set(np.unique(tensor_array)) <= {0, 1}:
+                active_voxels = np.sum(tensor_array)
+                total_voxels = tensor_array.size
+                sparsity = (active_voxels / total_voxels) * 100 if total_voxels > 0 else 0
+                
+                log_callback(f"   📈 TENSOR [{name}]: Shape={shape} ({dtype}), Voxels={active_voxels:,}/{total_voxels:,} ({sparsity:.4f}% Active)")
+                return
+                
+            # Scalar characteristics (Floats, physical metrics)
+            valid_data = tensor_array[np.isfinite(tensor_array)]
+            if valid_data.size > 0:
+                min_val = float(np.min(valid_data))
+                max_val = float(np.max(valid_data))
+                mean_val = float(np.mean(valid_data))
+                log_callback(f"   📈 TENSOR [{name}]: Shape={shape} ({dtype}), Min={min_val:.2f}, Mean={mean_val:.2f}, Max={max_val:.2f}")
+            else:
+                log_callback(f"   📈 TENSOR [{name}]: Shape={shape} ({dtype}), [ALL CONSTANT/NAN/EMPTY]")
+                
+        except Exception as e:
+            log_callback(f"   ⚠️ Failed to extract telemetry for tensor '{name}': {e}")
     
     # ═══════════════════════════════════════════════════════════════════════════
     # GROUND TRUTH VALIDATION
@@ -1152,7 +1182,7 @@ class TEPProcessingService:
             'periodicity_score': periodicity_score if 'periodicity_score' in locals() else 0.0
         }
         
-    def _compute_multiscale_vesselness(self, data, spacing, mask=None, sigma_range=(1.0, 3.0)):
+    def _compute_multiscale_vesselness(self, data, spacing, mask=None, sigma_range=(1.0, 3.0), log_callback=None):
         """
         TASK 1: Centralized Hessian & Eigenvalue Logic (Multiscale).
         Computes Frangi-like vesselness and returns sorted eigenvalues.
@@ -1165,12 +1195,33 @@ class TEPProcessingService:
         l1_last, l2_last, l3_last = None, None, None
         
         for scale in [0.5, 1.0]:  # 0.5 captures 1-2 pixel distal branches
-            # Compute Hessian matrix for current scale
-            H_elems = hessian_matrix(data, sigma=scale, order='rc')
+            # Compute Hessian matrix for current scale (Separable Gaussians are fast: ~2s)
+            # Apply voxel spacing correction if provided so scaling is isotropic
+            if spacing is not None and len(spacing) >= 3:
+                # We enforce min scale = 0.3 voxels to prevent numerical instability
+                sigmas = tuple(max(0.3, scale / sp) for sp in spacing)
+            else:
+                sigmas = scale
+                
+            H_elems = hessian_matrix(data, sigma=sigmas, order='rc')
             
-            # Compute eigenvalues (skimage returns them in descending order: |lambda1| >= |lambda2| >= |lambda3|)
-            # For 3D, hessian_matrix_eigvals returns a list of 3 arrays.
+            # OPTIMIZATION: Sparse Eigenvalue calculation (O(K) instead of O(N))
+            # hessian_matrix_eigvals solves a 3x3 polynomial for EVERY pixel. 
+            # On 94M voxels, this takes 24 minutes. If we flatten and extract only the mask, it takes < 1 segundo.
+            mask_bool = None
+            if mask is not None:
+                mask_bool = mask > 0
+                if not np.any(mask_bool):
+                    continue
+                # Extract 1D array of only the candidate pixels
+                H_elems = [H[mask_bool] for H in H_elems]
+                
+            # Compute eigenvalues (skimage returns them in descending absolute order usually)
             eigvals = hessian_matrix_eigvals(H_elems)
+            
+            # [PHASE 7] TENSOR TELEMETRY - Check math limits
+            if mask is not None and len(eigvals) >= 3 and log_callback:
+                self._log_tensor_stats("Hessian_O(K)_Sparse_Array_L1", eigvals[0], log_callback)
             
             # Check dimensionality
             if eigvals.shape[0] < 3:
@@ -1188,13 +1239,6 @@ class TEPProcessingService:
                 l3 = np.take_along_axis(eigvals, sort_indices[2:3], axis=0)[0]
             
             l1_last, l2_last, l3_last = l1, l2, l3
-            
-            # OPTIMIZATION: Mask out empty space before heavy math
-            if mask is not None:
-                mask_bool = mask > 0
-                l1 = l1[mask_bool]
-                l2 = l2[mask_bool]
-                l3 = l3[mask_bool]
             
             # Frangi parameters
             alpha = 0.5
@@ -1225,6 +1269,22 @@ class TEPProcessingService:
         # Handle NaNs
         vesselness = np.nan_to_num(vesselness_max)
         
+        # [PHASE 7] TENSOR TELEMETRY - Final Vesselness Output
+        if log_callback:
+            self._log_tensor_stats("Frangi_Vesselness_Map", vesselness_max, log_callback)
+            
+        # Safely reconstruct full 3D arrays for eigenvalues to preserve API contract
+        if mask is not None and l1_last is not None:
+            l1_full = np.zeros_like(data, dtype=np.float32)
+            l2_full = np.zeros_like(data, dtype=np.float32)
+            l3_full = np.zeros_like(data, dtype=np.float32)
+            
+            l1_full[mask_bool] = l1_last
+            l2_full[mask_bool] = l2_last
+            l3_full[mask_bool] = l3_last
+            
+            return vesselness, l1_full, l2_full, l3_full
+            
         return vesselness, l1_last, l2_last, l3_last
 
     def _apply_vector_guided_extrapolation(self, candidates_mask, data, spacing, fac_map):
@@ -1531,10 +1591,10 @@ class TEPProcessingService:
         is_3d = data.ndim == 3
         
         if is_3d:
-            # 3D: shape is (Z, Y, X) - crop Y and X (axes 1 and 2), preserve Z (axis 0)
-            shape_y, shape_x = data.shape[1], data.shape[2]
+            # 3D: shape is (X, Y, Z) - crop X and Y (axes 0 and 1)
+            shape_y, shape_x = data.shape[1], data.shape[0]
             spacing_y = spacing[1] if len(spacing) > 1 else 1.0
-            spacing_x = spacing[2] if len(spacing) > 2 else 1.0
+            spacing_x = spacing[0] if len(spacing) > 0 else 1.0
         else:
             # 2D: shape is (Y, X) - crop both axes
             shape_y, shape_x = data.shape[0], data.shape[1]
@@ -1548,13 +1608,13 @@ class TEPProcessingService:
         
         if coords.size > 0:
             if is_3d:
-                # coords columns are (Z, Y, X) for 3D
-                y_min_raw, y_max_raw = int(coords[:, 1].min()), int(coords[:, 1].max())
-                x_min_raw, x_max_raw = int(coords[:, 2].min()), int(coords[:, 2].max())
+                # coords columns are (X, Y, Z) for 3D
+                x_min_raw, y_min_raw = int(coords[:, 0].min()), int(coords[:, 1].min())
+                x_max_raw, y_max_raw = int(coords[:, 0].max()), int(coords[:, 1].max())
             else:
                 # coords columns are (Y, X) for 2D
-                y_min_raw, y_max_raw = int(coords[:, 0].min()), int(coords[:, 0].max())
-                x_min_raw, x_max_raw = int(coords[:, 1].min()), int(coords[:, 1].max())
+                y_min_raw, x_min_raw = int(coords[:, 0].min()), int(coords[:, 1].min())
+                y_max_raw, x_max_raw = int(coords[:, 0].max()), int(coords[:, 1].max())
             
             # Apply buffer
             x_start = max(0, x_min_raw - buffer)
@@ -1586,8 +1646,8 @@ class TEPProcessingService:
         
         # Apply crop based on dimensionality
         if is_3d:
-            # 3D: Keep all Z slices, crop Y and X
-            data_cropped = data[:, y_start:y_end, x_start:x_end]
+            # 3D: Keep all Z slices, crop X and Y
+            data_cropped = data[x_start:x_end, y_start:y_end, :]
         else:
             # 2D: Crop Y and X directly
             data_cropped = data[y_start:y_end, x_start:x_end]
@@ -1617,14 +1677,14 @@ class TEPProcessingService:
         is_3d = crop_info.get('is_3d', mask.ndim == 3)
         
         if is_3d and mask.ndim == 3:
-            # 3D: Keep all Z slices, crop Y and X
-            return mask[:, bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end']]
+            # 3D: Keep all Z slices, crop X and Y
+            return mask[bounds['x_start']:bounds['x_end'], bounds['y_start']:bounds['y_end'], :]
         elif mask.ndim == 2:
             # 2D: Crop Y and X directly
             return mask[bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end']]
         else:
-            # Fallback for unexpected cases (assume 3D Z, Y, X)
-            return mask[:, bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end']]
+            # Fallback for unexpected cases (assume 3D X, Y, Z)
+            return mask[bounds['x_start']:bounds['x_end'], bounds['y_start']:bounds['y_end'], :]
     
     def _expand_to_original(self, array, original_shape, crop_info):
         """Expand a cropped array back to original dimensions (zero-padded, dimension-aware)."""
@@ -1635,16 +1695,16 @@ class TEPProcessingService:
         
         # Handle different array dimensionalities
         if len(original_shape) == 4:
-            # 4D: RGBA heatmap (Z, Y, X, C) - crop was on Y, X
-            expanded[:, bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end'], :] = array
+            # 4D: RGBA heatmap (X, Y, Z, C) - crop was on X, Y
+            expanded[bounds['x_start']:bounds['x_end'], bounds['y_start']:bounds['y_end'], :, :] = array
         elif len(original_shape) == 3 and is_3d:
-            # 3D: Volume (Z, Y, X) - crop was on Y, X
-            expanded[:, bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end']] = array
+            # 3D: Volume (X, Y, Z) - crop was on X, Y
+            expanded[bounds['x_start']:bounds['x_end'], bounds['y_start']:bounds['y_end'], :] = array
         elif len(original_shape) == 2:
             # 2D: Single slice (Y, X)
             expanded[bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end']] = array
         else:
-            expanded[:, bounds['y_start']:bounds['y_end'], bounds['x_start']:bounds['x_end']] = array
+            expanded[bounds['x_start']:bounds['x_end'], bounds['y_start']:bounds['y_end'], :] = array
         
         return expanded
     
@@ -2090,55 +2150,53 @@ class TEPProcessingService:
         
         pa_coords = np.argwhere(pa_mask)
         if pa_coords.size > 0:
-            # Get PA bounds in (Z,Y,X)
-            min_z, min_y, min_x = pa_coords.min(axis=0)
-            max_z, max_y, max_x = pa_coords.max(axis=0)
+            # Get PA bounds in (X,Y,Z)
+            min_x, min_y, min_z = pa_coords.min(axis=0)
+            max_x, max_y, max_z = pa_coords.max(axis=0)
             
             # Margin must handle vesselness gaussian windows (sigma=3 means ~9px radius)
             margin = 15
             
-            z_start, z_end = max(0, min_z - margin), min(data.shape[0], max_z + margin + 1)
+            x_start, x_end = max(0, min_x - margin), min(data.shape[0], max_x + margin + 1)
             y_start, y_end = max(0, min_y - margin), min(data.shape[1], max_y + margin + 1)
-            x_start, x_end = max(0, min_x - margin), min(data.shape[2], max_x + margin + 1)
+            z_start, z_end = max(0, min_z - margin), min(data.shape[2], max_z + margin + 1)
             
             # Extract small cuboid (~5-10% of total volume)
-            sub_data = data[z_start:z_end, y_start:y_end, x_start:x_end]
-            sub_pa_mask = pa_mask[z_start:z_end, y_start:y_end, x_start:x_end]
+            sub_data = data[x_start:x_end, y_start:y_end, z_start:z_end]
+            sub_pa_mask = pa_mask[x_start:x_end, y_start:y_end, z_start:z_end]
             
+            if log_callback: 
+                v_orig = np.prod(data.shape)
+                v_sub = np.prod(sub_data.shape)
+                pct = (v_sub / v_orig) * 100.0
+                log_callback(f"   📦 Bbox size: {sub_data.shape} ({v_sub:,} voxels). Reduced geometric RAM footprint to {pct:.1f}%")
         else:
             # Fallback if pa_mask is entirely empty (should never happen here)
             sub_data = data
             sub_pa_mask = pa_mask
-            z_start, y_start, x_start = 0, 0, 0
-            z_end, y_end, x_end = data.shape
+            x_start, y_start, z_start = 0, 0, 0
+            x_end, y_end, z_end = data.shape
             
         # Initialize full-size arrays with zeros
         hodge_score = np.zeros_like(data, dtype=np.float32)
         ricci_score = np.zeros_like(data, dtype=np.float32)
         v_map = np.zeros_like(data, dtype=np.float32)
-        
+
         # ── HODGE SENSOR (LOCAL) ──
         try:
             sub_hodge = self._compute_hodge_features(sub_data, spacing)
-            hodge_score[z_start:z_end, y_start:y_end, x_start:x_end] = sub_hodge
+            hodge_score[x_start:x_end, y_start:y_end, z_start:z_end] = sub_hodge
         except Exception as e:
             if log_callback: log_callback(f"   ⚠️ Hodge sensor fallback (error: {e})")
             
-        # ── RICCI CURVATURE SENSOR (LOCAL) ──
-        if log_callback: log_callback("   🪐 Computing Ricci Discrete Curvature on mini-cube...")
+        # ── RICCI SENSOR (LOCAL) ──
         try:
             sub_ricci = self._compute_forman_ricci_curvature(sub_data, sub_pa_mask, spacing)
-            ricci_score[z_start:z_end, y_start:y_end, x_start:x_end] = sub_ricci
+            ricci_score[x_start:x_end, y_start:y_end, z_start:z_end] = sub_ricci
         except Exception as e:
             if log_callback: log_callback(f"   ⚠️ Ricci sensor fallback (error: {e})")
             
-        # ── VESSELNESS SENSOR (LOCAL) ──
-        if log_callback: log_callback("   🚀 Computing Multiscale Vesselness (Hessian Tube Sensor) on mini-cube...")
-        try:
-            sub_vmap, _, _, _ = self._compute_multiscale_vesselness(sub_data, spacing, mask=sub_pa_mask)
-            v_map[z_start:z_end, y_start:y_end, x_start:x_end] = sub_vmap
-        except Exception as e:
-            if log_callback: log_callback(f"   ⚠️ Vesselness sensor fallback (error: {e})")
+        # Vesselness will be computed locally per-candidate to save memory and CPU
 
         if log_callback:
             log_callback(f"   🔍 [DIAG] Sensors completed successfully via bounded crop.")
@@ -2150,23 +2208,30 @@ class TEPProcessingService:
         # Expand PA bounds to encapsulate the "dark holes" and occlusions
         pa_dilated = binary_dilation(pa_mask, structure=struct_3d, iterations=3)
         
-        # NEW: Lung Proximity Shield (Vectorized 3D O(N) EDT)
+        # NEW: Lung Proximity Shield (Vectorized 3D isotropic EDT)
         # Emboli happen in/near the lungs. The heart wall is too far from aerated lung.
         lung_core = data < -400  # Aerated lung tissue
-        # Use Distance Transform for blazingly fast 3D dilation (~15 pixels)
-        lung_proximity = distance_transform_edt(~lung_core) <= 15
+        # Use Distance Transform with real physical spacing (e.g. 10mm radius)
+        lung_proximity = distance_transform_edt(~lung_core, sampling=spacing) <= 10.0
         
         # 2. Base Density Mask (Constrained to dilated PA AND Lung Proximity)
         # Expanded range: 15 HU (chronic/dark thrombi) to 120 HU (mixed with contrast)
         # Noise from 15-30 HU is controlled by topological PA-connectivity check downstream
         defect_mask = (data >= 15) & (data <= 120) & pa_dilated & lung_proximity
         
-        # 3 & 4. Anatomical Exclusions & Edge Removal (Vectorized 3D O(N))
+        if log_callback:
+            self._log_tensor_stats("03_Defect_Base_Mask", defect_mask, log_callback)
+        
+        # 3 & 4. Anatomical Exclusions & Edge Removal (Isotropic 3D in mm)
         bone_core = data > 400
-        bone_mask = distance_transform_edt(~bone_core) <= 4
+        bone_mask = distance_transform_edt(~bone_core, sampling=spacing) <= 3.0
         
         lung_excl_core = data < -400
-        lung_exclusion = distance_transform_edt(~lung_excl_core) <= 2
+        lung_exclusion = distance_transform_edt(~lung_excl_core, sampling=spacing) <= 1.5
+        
+        if log_callback:
+            self._log_tensor_stats("04_Bone_Exclusion_Mask", bone_mask, log_callback)
+            self._log_tensor_stats("05_Lung_Exclusion_Mask", lung_exclusion, log_callback)
         
         # Fast Separable 3D Laplacian (O(N) via FFT/Convolution separable pass)
         edges = gaussian_laplace(data.astype(np.float32), sigma=1.0)
@@ -2180,10 +2245,22 @@ class TEPProcessingService:
         defect_mask = binary_fill_holes(defect_mask)
         defect_mask = remove_small_objects(defect_mask, min_size=5)
         
+        if log_callback:
+            self._log_tensor_stats("06_Cleaned_Candidates_Mask", defect_mask, log_callback)
+        
+        # ── LOCALIZED MULTISCALE VESSELNESS (O(1) MATRICES) ──
+        # Computing Frangi vesselness purely on the `pa_mask` constrained areas.
+        # This calls the strictly sparse-optimised function.
+        if log_callback: log_callback("   🚀 Computing Sparse Hessian Vesselness (O(K) optimized)...")
+        try:
+            v_map, _, _, _ = self._compute_multiscale_vesselness(data, spacing, mask=defect_mask, log_callback=log_callback)
+        except Exception as e:
+            if log_callback: log_callback(f"   ⚠️ Vesselness sensor fallback (error: {e})")
+            
         # 6. Build Score Map (STRICTLY CONSTRAINED TO DEFECT MASK)
         score_map = np.zeros(data.shape, dtype=np.float32)
         score_map[defect_mask] += 1.0  # Base density
-        
+                            
         # Only award bonus points IF the pixel is already a candidate defect
         score_map[(v_map > 0.2) & defect_mask] += 1.0
         score_map[(coherence_map < 0.5) & defect_mask] += 1.0
@@ -2296,12 +2373,12 @@ class TEPProcessingService:
                 # --- ANAOTOMICAL Z-GUARD (Apex/Neck False Positive Filter) ---
                 # Exclude findings in the very top slices IF the arterial tree is too thin there.
                 # (Prevents flagging neck veins or beam-hardening artifacts near the shoulders)
-                cz, cy, cx = region.centroid
+                cx, cy, cz = region.centroid
                 candidate_z = int(cz)
                 
                 if candidate_z < self.Z_GUARD_MIN_SLICE:
-                    # Count PA voxels in this specific Z-slice
-                    pa_voxels_in_slice = np.sum(pa_mask[candidate_z])
+                    # Count PA voxels in this specific Z-slice (Axis 2)
+                    pa_voxels_in_slice = np.sum(pa_mask[:, :, candidate_z])
                     if pa_voxels_in_slice < self.Z_GUARD_MIN_PA_VOXELS:
                         if log_callback:
                             log_callback(f"   🛡️ Z-GUARD: Rejecting candidate at Z={candidate_z} (Apex). PA area = {pa_voxels_in_slice} voxels (< {self.Z_GUARD_MIN_PA_VOXELS})")
@@ -2310,28 +2387,28 @@ class TEPProcessingService:
                 # --- THE INFORMATION SANDWICH FIX ---
                 bbox = region.bbox
                 if len(bbox) == 6:
-                    z1, y1, x1, z2, y2, x2 = bbox  # regionprops follows array axes (Z,Y,X)
+                    x1, y1, z1, x2, y2, z2 = bbox  # regionprops follows array axes (X,Y,Z)
                 else: # Handle rare 2D bbox case
                     y1, x1, y2, x2 = bbox
-                    z1, z2 = 0, data.shape[0]      # Z is axis 0
+                    z1, z2 = 0, data.shape[2]      # Z is axis 2
 
                 # Check thickness. If flat (1 slice), add Padding (The Sandwich)
                 z_thickness = z2 - z1
-                if z_thickness <= 1 and data.shape[0] > 5:
+                if z_thickness <= 1 and data.shape[2] > 5:
                     # Expand context: 1 slice above, 1 slice below
                     z_start_pad = max(0, z1 - 1)
-                    z_end_pad = min(data.shape[0], z2 + 1)
+                    z_end_pad = min(data.shape[2], z2 + 1)
                     
                     # Crop with context for physics calculation
-                    voi_data_for_physics = data[z_start_pad:z_end_pad, y1:y2, x1:x2]
+                    voi_data_for_physics = data[x1:x2, y1:y2, z_start_pad:z_end_pad]
                     
                     # Pad the mask to match the physics crop
                     pad_top = z1 - z_start_pad
                     pad_bottom = z_end_pad - z2
                     mask_original = self._ensure_3d(region.image)
-                    voi_mask_for_physics = np.pad(mask_original, ((pad_top, pad_bottom), (0,0), (0,0)), mode='constant')
+                    voi_mask_for_physics = np.pad(mask_original, ((0,0), (0,0), (pad_top, pad_bottom)), mode='constant')
                 else:
-                    voi_data_for_physics = data[z1:z2, y1:y2, x1:x2]
+                    voi_data_for_physics = data[x1:x2, y1:y2, z1:z2]
                     voi_mask_for_physics = self._ensure_3d(region.image)
                 
                 # Run Physics on Padded/Sandwiched Data
@@ -2340,7 +2417,7 @@ class TEPProcessingService:
                 if rugosity['is_airway']: continue 
                 
                 # --- SAFE ASSIGNMENT (Fixes IndexError) ---
-                target_slice = thresholded_mask[z1:z2, y1:y2, x1:x2]
+                target_slice = thresholded_mask[x1:x2, y1:y2, z1:z2]
                 mask_to_write = self._ensure_3d(region.image)
                 
                 # Explicitly reshape mask to fit target (Fixes implicit squeeze mismatch)
@@ -2687,7 +2764,7 @@ class TEPProcessingService:
     # ═══════════════════════════════════════════════════════════════════════════
     # NEW: Vessel Centerline Extraction using Skeletonize
     # ═══════════════════════════════════════════════════════════════════════════
-    def _extract_vessel_centerline(self, pa_mask, data, log_callback=None):
+    def _extract_vessel_centerline(self, pa_mask, data, spacing=None, log_callback=None):
         """
         Extract the centerline (skeleton) of the pulmonary artery tree.
         
@@ -2723,7 +2800,7 @@ class TEPProcessingService:
         # Calculate distance transform from centerline for each point in PA
         # This gives distance-from-vessel-center for each voxel
         if np.any(centerline):
-            distance_from_center = distance_transform_edt(~centerline)
+            distance_from_center = distance_transform_edt(~centerline, sampling=spacing)
             # Mask to PA region
             distance_in_pa = distance_from_center.copy()
             distance_in_pa[~pa_mask] = 0
