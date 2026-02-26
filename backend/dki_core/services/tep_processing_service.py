@@ -967,6 +967,16 @@ class TEPProcessingService:
         gt_voxels = int(np.sum(gt_mask))
         mart_voxels = int(np.sum(mart_binary))
         intersection_voxels = int(np.sum(gt_mask & mart_binary))
+        
+        # If intersection is near zero despite both having volume, try transposing X and Y
+        if intersection_voxels < 100 and gt_voxels > 0 and mart_voxels > 0:
+            gt_transposed = np.transpose(gt_mask, (1, 0, 2)) # Swap X and Y
+            new_intersection = int(np.sum(gt_transposed & mart_binary))
+            if new_intersection > intersection_voxels:
+                gt_mask = gt_transposed
+                intersection_voxels = new_intersection
+                if log_callback:
+                    log_callback("  🔄 Auto-transposed GT mask (X/Y swap) for correct anatomical alignment.")
         missed_voxels = int(np.sum(gt_mask & ~mart_binary))  # FN: in GT but not in MART
         discovery_voxels = int(np.sum(~gt_mask & mart_binary))  # FP: in MART but not in GT
         
@@ -2482,7 +2492,6 @@ class TEPProcessingService:
                 # Explicitly reshape mask to fit target (Fixes implicit squeeze mismatch)
                 if target_slice.size == mask_to_write.size:
                      reshaped_mask = mask_to_write.reshape(target_slice.shape)
-                     target_slice[reshaped_mask] = True
 
                 # ════════════════════════════════════════════════════════════════════
                 # [FIX] Robust Mean Score Calculation (Prevents Score 0.0)
@@ -2571,8 +2580,13 @@ class TEPProcessingService:
                     best_coord_global[2]
                 )
                 
+                # Only keep findings that reach at least SUSPICIOUS confidence
+                if mean_score < self.SCORE_THRESHOLD_SUSPICIOUS:
+                    continue
+
                 # SYNCHRONIZE VERDICTS: Draw the heatmap for the entire clot if the mean score qualifies
                 if target_slice.size == mask_to_write.size:
+                    target_slice[reshaped_mask] = True
                     if mean_score >= self.SCORE_THRESHOLD_DEFINITE:
                         definite_mask[x1:x2, y1:y2, z1:z2][reshaped_mask] = True
                     elif mean_score >= self.SCORE_THRESHOLD_SUSPICIOUS:
