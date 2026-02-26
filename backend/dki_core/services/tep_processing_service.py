@@ -1248,7 +1248,7 @@ class TEPProcessingService:
             # Frangi parameters
             alpha = 0.5
             beta = 0.5
-            c = 50  # SIGNIFICANT SENSITIVITY BOOST: Lowered from 500 to prevent signal dropping
+            c = 15  # SIGNIFICANT SENSITIVITY BOOST: Lowered from 50 to prevent signal dropping
             
             ra = np.abs(l2) / (np.abs(l3) + 1e-10)
             rb = np.abs(l1) / (np.sqrt(np.abs(l2 * l3)) + 1e-10)
@@ -2280,7 +2280,7 @@ class TEPProcessingService:
         
         # ── SYNERGY GATES ──
         # Gate 1: Puerta de la Verdad (Vaso + Obstrucción)
-        truth_gate = (geo_conf > 0.4) & (coherence_crop < 0.4)
+        truth_gate = (geo_conf > 0.15) & (coherence_crop < 0.45)
         synergy_mult[truth_gate] = 1.5
         
         # Gate 3: Filtro Supresor de Ganglios (Flujo Perfecto)
@@ -2415,6 +2415,9 @@ class TEPProcessingService:
         data = self._ensure_3d(data)
         labeled_mask = self._ensure_3d(labeled_mask)
         thresholded_mask = self._ensure_3d(thresholded_mask)
+        
+        definite_mask = np.zeros_like(data, dtype=bool)
+        suspicious_mask = np.zeros_like(data, dtype=bool)
         
         for idx, region in enumerate(regions):
             try:
@@ -2568,6 +2571,13 @@ class TEPProcessingService:
                     best_coord_global[2]
                 )
                 
+                # SYNCHRONIZE VERDICTS: Draw the heatmap for the entire clot if the mean score qualifies
+                if target_slice.size == mask_to_write.size:
+                    if mean_score >= self.SCORE_THRESHOLD_DEFINITE:
+                        definite_mask[x1:x2, y1:y2, z1:z2][reshaped_mask] = True
+                    elif mean_score >= self.SCORE_THRESHOLD_SUSPICIOUS:
+                        suspicious_mask[x1:x2, y1:y2, z1:z2][reshaped_mask] = True
+                
                 voi_findings.append({
                     'id': idx + 1,
                     'volume': candidate_volume_mm3 / 1000.0,  # Convert mm³ → cm³
@@ -2620,8 +2630,8 @@ class TEPProcessingService:
                 'hodge_max': float(np.max(hodge_score)),
                 'ricci_max': float(np.max(ricci_score))
             },
-            'definite_mask': (score_map >= self.SCORE_THRESHOLD_DEFINITE) & thresholded_mask,
-            'suspicious_mask': (score_map >= self.SCORE_THRESHOLD_SUSPICIOUS) & thresholded_mask,
+            'definite_mask': definite_mask & thresholded_mask,
+            'suspicious_mask': suspicious_mask & thresholded_mask,
             'is_tubular_mask': v_map > 0
         }
 
