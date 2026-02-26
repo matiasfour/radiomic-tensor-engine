@@ -80,7 +80,7 @@ class TEPProcessingService:
     SCORE_MK_POINTS = 1                    # MK criterion contributes 1 point
     SCORE_FAC_POINTS = 1                   # FAC criterion contributes 1 point
     SCORE_THRESHOLD_SUSPICIOUS = 2         # Score >= 2 = suspicious (yellow/orange)
-    SCORE_THRESHOLD_DEFINITE = 2.5         # Score >= 2.5 = definite thrombus (requires 3/4 evidence channels)
+    SCORE_THRESHOLD_DEFINITE = 3.0         # Score >= 3.0 = definite thrombus (requires Synergy Truth Gate or Extreme Sensors)
     
     # ═══════════════════════════════════════════════════════════════════════════
     # CONTRAST INHIBITOR: Pixels with HU > this threshold get Score = 0
@@ -2261,22 +2261,48 @@ class TEPProcessingService:
         except Exception as e:
             if log_callback: log_callback(f"   ⚠️ Vesselness sensor fallback (error: {e})")
             
-        # 6. Build Score Map (STRICTLY CONSTRAINED TO DEFECT MASK)
-        score_map = np.zeros(data.shape, dtype=np.float32)
-        score_map[defect_mask] += 1.0  # Base density
-                            
-        # Only award bonus points IF the pixel is already a candidate defect
-        score_map[(v_map > 0.2) & defect_mask] += 1.0
-        score_map[(coherence_map < 0.5) & defect_mask] += 1.0
-        score_map[(data >= 40) & (data <= 80) & defect_mask] += 1.0  # Boosted: perfect clot density should strongly influence Definite status
+        # 6. Build Score Map (MART-SIM Synergy Motor)
+        if log_callback: log_callback("   🧠 Applying MART-SIM Synergy Scoring...")
         
-        # Visual Noise Filter
-        noise_mask = (hodge_score > 300) | (np.abs(ricci_score) > 5.0)
-        voxels_blocked = int(np.sum(score_map[noise_mask] > 0))
-        score_map[noise_mask] = 0
+        score_map = np.zeros(data.shape, dtype=np.float32)
+        
+        # Extract features solely on the defect_mask to ensure O(K) computations
+        geo_conf = v_map[defect_mask]
+        phys_conf = 1.0 - coherence_map[defect_mask]
+        data_crop = data[defect_mask]
+        ricci_crop = ricci_score[defect_mask]
+        hodge_crop = hodge_score[defect_mask]
+        coherence_crop = coherence_map[defect_mask]
+        
+        synergy_mult = np.ones(np.sum(defect_mask), dtype=np.float32)
+        
+        # ── SYNERGY GATES ──
+        # Gate 1: Puerta de la Verdad (Vaso + Obstrucción)
+        truth_gate = (geo_conf > 0.4) & (coherence_crop < 0.4)
+        synergy_mult[truth_gate] = 1.5
+        
+        # Gate 3: Filtro Supresor de Ganglios (Flujo Perfecto)
+        ganglion_suppressor = coherence_crop > 0.7
+        synergy_mult[ganglion_suppressor] = 0.5
+        
+        # Base Score Integration
+        base_scores = (1.0 + geo_conf + phys_conf) * synergy_mult
+        
+        # Gate 2: Puerta de la Rugosidad (Validación Clínica RICCI + HU)
+        rugosity_gate = (data_crop >= 40) & (data_crop <= 80) & (np.abs(ricci_crop) > 1.0)
+        base_scores[rugosity_gate] += 1.0
+        
+        # Visual Noise Filter (Extreme Hodge or Ricci)
+        noise_mask = (hodge_crop > 300) | (np.abs(ricci_crop) > 5.0)
+        voxels_blocked = int(np.sum(noise_mask))
+        base_scores[noise_mask] = 0.0
         
         if log_callback and voxels_blocked > 0:
             log_callback(f"   🛡️ Visual Noise Filter blocked {voxels_blocked:,} artifact voxels")
+            
+        # Re-assign scores back to the 3D volume
+        score_map[defect_mask] = base_scores
+
         
         # 7. Candidate Extraction (WHOLE-CLOT PRESERVATION)
         from scipy.ndimage import label as scipy_label
@@ -2415,9 +2441,9 @@ class TEPProcessingService:
                 # --- THE INFORMATION SANDWICH FIX ---
                 bbox = region.bbox
                 if len(bbox) == 6:
-                    x1, y1, z1, x2, y2, z2 = bbox  # regionprops follows array axes (X,Y,Z)
+                    x1, y1, z1, x2, y2, z2 = bbox  # array is ALWAYS natively (X, Y, Z) 
                 else: # Handle rare 2D bbox case
-                    y1, x1, y2, x2 = bbox
+                    x1, y1, x2, y2 = bbox
                     z1, z2 = 0, data.shape[2]      # Z is axis 2
 
                 # Check thickness. If flat (1 slice), add Padding (The Sandwich)
@@ -2488,7 +2514,7 @@ class TEPProcessingService:
                     # If any numpy error occurs above, assume the crop is valid and take its mean.
                     # This guarantees we NEVER return 0.0 for a valid finding.
                     try:
-                        fallback_crop = score_map[z1:z2, y1:y2, x1:x2]
+                        fallback_crop = score_map[x1:x2, y1:y2, z1:z2]
                         if fallback_crop.size > 0:
                             mean_score = float(np.mean(fallback_crop))
                     except:
@@ -2517,9 +2543,9 @@ class TEPProcessingService:
                     
                 # Translate from BBox local coordinates to the Cropped-Data coordinate space!
                 best_coord = (
-                    best_coord_local[0] + z1,
+                    best_coord_local[0] + x1,
                     best_coord_local[1] + y1,
-                    best_coord_local[2] + x1
+                    best_coord_local[2] + z1
                 )
                 
                 voi_findings.append({
