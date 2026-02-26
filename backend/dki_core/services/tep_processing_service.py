@@ -76,7 +76,7 @@ class TEPProcessingService:
     # ═══════════════════════════════════════════════════════════════════════════
     # SCORING SYSTEM: Replace strict AND with weighted scoring
     # ═══════════════════════════════════════════════════════════════════════════
-    SCORE_HU_POINTS = 1                    # HU criterion contributes 1 point (equal weight with MK/FAC to prevent HU-alone DEFINITE)
+    SCORE_HU_POINTS = 1.5                  # HU criterion contributes 1.5 point (Critical density base)
     SCORE_MK_POINTS = 1                    # MK criterion contributes 1 point
     SCORE_FAC_POINTS = 1                   # FAC criterion contributes 1 point
     SCORE_THRESHOLD_SUSPICIOUS = 2         # Score >= 2 = suspicious (yellow/orange)
@@ -1132,8 +1132,8 @@ class TEPProcessingService:
              # Definitely air
              is_airway = True
              coherence_val = 0.55
-        elif fac_mean > 0.4 and mean_hu < 50:
-             # Potential airway with mucus or partial volume
+        elif fac_mean > 0.4 and mean_hu < 15:
+             # Potential airway with mucus or partial volume (HU below thrombus range)
              # ------------------------------------------------------------------
              # TASK 2: True Bronchial Filtering (FFT Analysis)
              # ------------------------------------------------------------------
@@ -1247,7 +1247,7 @@ class TEPProcessingService:
             # Frangi parameters
             alpha = 0.5
             beta = 0.5
-            c = 500  # Half the maximum Hessian norm
+            c = 50  # SIGNIFICANT SENSITIVITY BOOST: Lowered from 500 to prevent signal dropping
             
             ra = np.abs(l2) / (np.abs(l3) + 1e-10)
             rb = np.abs(l1) / (np.sqrt(np.abs(l2 * l3)) + 1e-10)
@@ -1259,8 +1259,9 @@ class TEPProcessingService:
                 (1 - np.exp(-(s**2) / (2 * c**2)))
             )
             
-            # Suppression conditions for bright tubes (contrast enhanced blood)
-            condition = (l2 < 0) & (l3 < 0)
+            # Suppression conditions for dark tubes (filling defects / clots)
+            # Hypodense clots inside hyperdense contrast evaluating to positive derivatives
+            condition = (l2 > 0) & (l3 > 0)
             vess_scale[~condition] = 0
             
             if mask is not None:
