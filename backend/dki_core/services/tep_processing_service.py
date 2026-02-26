@@ -255,6 +255,7 @@ class TEPProcessingService:
         # Use cropped data for analysis
         working_data = data_cropped
         working_exclusion = exclusion_mask_cropped
+        self._log_tensor_stats("00_Data_Cropped", working_data, log_callback)
         
         # ═══════════════════════════════════════════════════════════════════════════
         # STEP 2: Verify contrast enhancement (NON-BLOCKING)
@@ -320,6 +321,8 @@ class TEPProcessingService:
         # Check if study requires manual review (ROI too small after erosion)
         if erosion_info.get('requires_manual_review', False):
             warnings_list.append(f"ROI reduced to {erosion_info['reduction_percentage']:.1f}% - REQUIRES_MANUAL_REVIEW")
+            
+        self._log_tensor_stats("01_Lung_Mask", lung_mask, log_callback)
         
         # ═══════════════════════════════════════════════════════════════════════════
         # STEP 4: Segment pulmonary arteries
@@ -345,14 +348,19 @@ class TEPProcessingService:
                  lung_mask, 
                  dynamic_min_hu=dynamic_min_hu,
                  log_callback=log_callback
-             )        
+             )
+        
+        self._log_tensor_stats("02_PA_Mask", pa_mask, log_callback)
+         
         # ═══════════════════════════════════════════════════════════════════════════
         # STEP 4.5: Extract vessel centerline for advanced analysis
         # ═══════════════════════════════════════════════════════════════════════════
         if log_callback:
             log_callback("Step 4.5/9: Extracting vessel centerline (skeletonize)...")
         
-        centerline, centerline_info = self._extract_vessel_centerline(pa_mask, working_data, log_callback)
+        centerline, centerline_info = self._extract_vessel_centerline(
+            pa_mask, working_data, spacing=spacing, log_callback=log_callback
+        )
         
         # ═══════════════════════════════════════════════════════════════════════════
         # STEP 5: Calculate local kurtosis (MK) map
@@ -814,7 +822,50 @@ class TEPProcessingService:
                 if log_callback:
                     log_callback(f"  ⚠️ Warning: Ground truth validation failed: {str(e)}", level='WARNING')
         
+        # Free memory aggressively inside loop
+        del working_data, lung_mask, pa_mask, heatmap, heatmap_full
+        import gc
+        gc.collect()
+
         return results
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MATHEMATICAL TELEMETRY HELPER (PHASE 7)
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    def _log_tensor_stats(self, name, tensor_array, log_callback=None):
+        """
+        Phase 7: Extracts mathematical telemetry from a numpy array (Shape, Sparsity, Min, Max, Mean)
+        and prints it to the console to audit geometric operations without file I/O overhead.
+        """
+        if not log_callback or tensor_array is None:
+            return
+            
+        try:
+            shape = tensor_array.shape
+            dtype = tensor_array.dtype
+            
+            # Mask characteristics (Booleans & integers)
+            if tensor_array.dtype == bool or set(np.unique(tensor_array)) <= {0, 1}:
+                active_voxels = np.sum(tensor_array)
+                total_voxels = tensor_array.size
+                sparsity = (active_voxels / total_voxels) * 100 if total_voxels > 0 else 0
+                
+                log_callback(f"   📈 TENSOR [{name}]: Shape={shape} ({dtype}), Voxels={active_voxels:,}/{total_voxels:,} ({sparsity:.4f}% Active)")
+                return
+                
+            # Scalar characteristics (Floats, physical metrics)
+            valid_data = tensor_array[np.isfinite(tensor_array)]
+            if valid_data.size > 0:
+                min_val = float(np.min(valid_data))
+                max_val = float(np.max(valid_data))
+                mean_val = float(np.mean(valid_data))
+                log_callback(f"   📈 TENSOR [{name}]: Shape={shape} ({dtype}), Min={min_val:.2f}, Mean={mean_val:.2f}, Max={max_val:.2f}")
+            else:
+                log_callback(f"   📈 TENSOR [{name}]: Shape={shape} ({dtype}), [ALL CONSTANT/NAN/EMPTY]")
+                
+        except Exception as e:
+            log_callback(f"   ⚠️ Failed to extract telemetry for tensor '{name}': {e}")
     
     # ═══════════════════════════════════════════════════════════════════════════
     # GROUND TRUTH VALIDATION
@@ -1131,7 +1182,7 @@ class TEPProcessingService:
             'periodicity_score': periodicity_score if 'periodicity_score' in locals() else 0.0
         }
         
-    def _compute_multiscale_vesselness(self, data, spacing, mask=None, sigma_range=(1.0, 3.0)):
+    def _compute_multiscale_vesselness(self, data, spacing, mask=None, sigma_range=(1.0, 3.0), log_callback=None):
         """
         TASK 1: Centralized Hessian & Eigenvalue Logic (Multiscale).
         Computes Frangi-like vesselness and returns sorted eigenvalues.
@@ -1144,12 +1195,33 @@ class TEPProcessingService:
         l1_last, l2_last, l3_last = None, None, None
         
         for scale in [0.5, 1.0]:  # 0.5 captures 1-2 pixel distal branches
-            # Compute Hessian matrix for current scale
-            H_elems = hessian_matrix(data, sigma=scale, order='rc')
+            # Compute Hessian matrix for current scale (Separable Gaussians are fast: ~2s)
+            # Apply voxel spacing correction if provided so scaling is isotropic
+            if spacing is not None and len(spacing) >= 3:
+                # We enforce min scale = 0.3 voxels to prevent numerical instability
+                sigmas = tuple(max(0.3, scale / sp) for sp in spacing)
+            else:
+                sigmas = scale
+                
+            H_elems = hessian_matrix(data, sigma=sigmas, order='rc')
             
-            # Compute eigenvalues (skimage returns them in descending order: |lambda1| >= |lambda2| >= |lambda3|)
-            # For 3D, hessian_matrix_eigvals returns a list of 3 arrays.
+            # OPTIMIZATION: Sparse Eigenvalue calculation (O(K) instead of O(N))
+            # hessian_matrix_eigvals solves a 3x3 polynomial for EVERY pixel. 
+            # On 94M voxels, this takes 24 minutes. If we flatten and extract only the mask, it takes < 1 segundo.
+            mask_bool = None
+            if mask is not None:
+                mask_bool = mask > 0
+                if not np.any(mask_bool):
+                    continue
+                # Extract 1D array of only the candidate pixels
+                H_elems = [H[mask_bool] for H in H_elems]
+                
+            # Compute eigenvalues (skimage returns them in descending absolute order usually)
             eigvals = hessian_matrix_eigvals(H_elems)
+            
+            # [PHASE 7] TENSOR TELEMETRY - Check math limits
+            if mask is not None and len(eigvals) >= 3 and log_callback:
+                self._log_tensor_stats("Hessian_O(K)_Sparse_Array_L1", eigvals[0], log_callback)
             
             # Check dimensionality
             if eigvals.shape[0] < 3:
@@ -1167,13 +1239,6 @@ class TEPProcessingService:
                 l3 = np.take_along_axis(eigvals, sort_indices[2:3], axis=0)[0]
             
             l1_last, l2_last, l3_last = l1, l2, l3
-            
-            # OPTIMIZATION: Mask out empty space before heavy math
-            if mask is not None:
-                mask_bool = mask > 0
-                l1 = l1[mask_bool]
-                l2 = l2[mask_bool]
-                l3 = l3[mask_bool]
             
             # Frangi parameters
             alpha = 0.5
@@ -1204,6 +1269,22 @@ class TEPProcessingService:
         # Handle NaNs
         vesselness = np.nan_to_num(vesselness_max)
         
+        # [PHASE 7] TENSOR TELEMETRY - Final Vesselness Output
+        if log_callback:
+            self._log_tensor_stats("Frangi_Vesselness_Map", vesselness_max, log_callback)
+            
+        # Safely reconstruct full 3D arrays for eigenvalues to preserve API contract
+        if mask is not None and l1_last is not None:
+            l1_full = np.zeros_like(data, dtype=np.float32)
+            l2_full = np.zeros_like(data, dtype=np.float32)
+            l3_full = np.zeros_like(data, dtype=np.float32)
+            
+            l1_full[mask_bool] = l1_last
+            l2_full[mask_bool] = l2_last
+            l3_full[mask_bool] = l3_last
+            
+            return vesselness, l1_full, l2_full, l3_full
+            
         return vesselness, l1_last, l2_last, l3_last
 
     def _apply_vector_guided_extrapolation(self, candidates_mask, data, spacing, fac_map):
@@ -2127,23 +2208,30 @@ class TEPProcessingService:
         # Expand PA bounds to encapsulate the "dark holes" and occlusions
         pa_dilated = binary_dilation(pa_mask, structure=struct_3d, iterations=3)
         
-        # NEW: Lung Proximity Shield (Vectorized 3D O(N) EDT)
+        # NEW: Lung Proximity Shield (Vectorized 3D isotropic EDT)
         # Emboli happen in/near the lungs. The heart wall is too far from aerated lung.
         lung_core = data < -400  # Aerated lung tissue
-        # Use Distance Transform for blazingly fast 3D dilation (~15 pixels)
-        lung_proximity = distance_transform_edt(~lung_core) <= 15
+        # Use Distance Transform with real physical spacing (e.g. 10mm radius)
+        lung_proximity = distance_transform_edt(~lung_core, sampling=spacing) <= 10.0
         
         # 2. Base Density Mask (Constrained to dilated PA AND Lung Proximity)
         # Expanded range: 15 HU (chronic/dark thrombi) to 120 HU (mixed with contrast)
         # Noise from 15-30 HU is controlled by topological PA-connectivity check downstream
         defect_mask = (data >= 15) & (data <= 120) & pa_dilated & lung_proximity
         
-        # 3 & 4. Anatomical Exclusions & Edge Removal (Vectorized 3D O(N))
+        if log_callback:
+            self._log_tensor_stats("03_Defect_Base_Mask", defect_mask, log_callback)
+        
+        # 3 & 4. Anatomical Exclusions & Edge Removal (Isotropic 3D in mm)
         bone_core = data > 400
-        bone_mask = distance_transform_edt(~bone_core) <= 4
+        bone_mask = distance_transform_edt(~bone_core, sampling=spacing) <= 3.0
         
         lung_excl_core = data < -400
-        lung_exclusion = distance_transform_edt(~lung_excl_core) <= 2
+        lung_exclusion = distance_transform_edt(~lung_excl_core, sampling=spacing) <= 1.5
+        
+        if log_callback:
+            self._log_tensor_stats("04_Bone_Exclusion_Mask", bone_mask, log_callback)
+            self._log_tensor_stats("05_Lung_Exclusion_Mask", lung_exclusion, log_callback)
         
         # Fast Separable 3D Laplacian (O(N) via FFT/Convolution separable pass)
         edges = gaussian_laplace(data.astype(np.float32), sigma=1.0)
@@ -2157,38 +2245,21 @@ class TEPProcessingService:
         defect_mask = binary_fill_holes(defect_mask)
         defect_mask = remove_small_objects(defect_mask, min_size=5)
         
+        if log_callback:
+            self._log_tensor_stats("06_Cleaned_Candidates_Mask", defect_mask, log_callback)
+        
+        # ── LOCALIZED MULTISCALE VESSELNESS (O(1) MATRICES) ──
+        # Computing Frangi vesselness purely on the `pa_mask` constrained areas.
+        # This calls the strictly sparse-optimised function.
+        if log_callback: log_callback("   🚀 Computing Sparse Hessian Vesselness (O(K) optimized)...")
+        try:
+            v_map, _, _, _ = self._compute_multiscale_vesselness(data, spacing, mask=defect_mask, log_callback=log_callback)
+        except Exception as e:
+            if log_callback: log_callback(f"   ⚠️ Vesselness sensor fallback (error: {e})")
+            
         # 6. Build Score Map (STRICTLY CONSTRAINED TO DEFECT MASK)
         score_map = np.zeros(data.shape, dtype=np.float32)
         score_map[defect_mask] += 1.0  # Base density
-        
-        # ── LOCALIZED MULTISCALE VESSELNESS (O(1) OPTIMIZATION) ──
-        # Instead of 94-million voxel 3D Convolutions, we extract just the candidate bounding boxes!
-        from scipy.ndimage import label as scipy_label
-        from skimage.measure import regionprops
-        
-        temp_labels, temp_num = scipy_label(defect_mask)
-        if temp_num > 0:
-            if log_callback: log_callback(f"   🚀 Computing Vesselness locally for {temp_num} candidates...")
-            props = regionprops(temp_labels)
-            for region in props:
-                bbox = region.bbox
-                if len(bbox) == 6:
-                    x1, y1, z1, x2, y2, z2 = bbox
-                    pad = 12
-                    x1_p, x2_p = max(0, x1 - pad), min(data.shape[0], x2 + pad)
-                    y1_p, y2_p = max(0, y1 - pad), min(data.shape[1], y2 + pad)
-                    z1_p, z2_p = max(0, z1 - pad), min(data.shape[2], z2 + pad)
-                    
-                    sub_crop = data[x1_p:x2_p, y1_p:y2_p, z1_p:z2_p]
-                    sub_mask = defect_mask[x1_p:x2_p, y1_p:y2_p, z1_p:z2_p]
-                    
-                    if np.any(sub_mask):
-                        try:
-                            svmap, _, _, _ = self._compute_multiscale_vesselness(sub_crop, spacing, mask=sub_mask)
-                            # Accumulate max vesselness (in case boxes overlap)
-                            v_map[x1_p:x2_p, y1_p:y2_p, z1_p:z2_p] = np.maximum(v_map[x1_p:x2_p, y1_p:y2_p, z1_p:z2_p], svmap)
-                        except Exception:
-                            pass
                             
         # Only award bonus points IF the pixel is already a candidate defect
         score_map[(v_map > 0.2) & defect_mask] += 1.0
@@ -2693,7 +2764,7 @@ class TEPProcessingService:
     # ═══════════════════════════════════════════════════════════════════════════
     # NEW: Vessel Centerline Extraction using Skeletonize
     # ═══════════════════════════════════════════════════════════════════════════
-    def _extract_vessel_centerline(self, pa_mask, data, log_callback=None):
+    def _extract_vessel_centerline(self, pa_mask, data, spacing=None, log_callback=None):
         """
         Extract the centerline (skeleton) of the pulmonary artery tree.
         
@@ -2729,7 +2800,7 @@ class TEPProcessingService:
         # Calculate distance transform from centerline for each point in PA
         # This gives distance-from-vessel-center for each voxel
         if np.any(centerline):
-            distance_from_center = distance_transform_edt(~centerline)
+            distance_from_center = distance_transform_edt(~centerline, sampling=spacing)
             # Mask to PA region
             distance_in_pa = distance_from_center.copy()
             distance_in_pa[~pa_mask] = 0
