@@ -1199,7 +1199,8 @@ class TEPProcessingService:
             # Apply voxel spacing correction if provided so scaling is isotropic
             if spacing is not None and len(spacing) >= 3:
                 # We enforce min scale = 0.3 voxels to prevent numerical instability
-                sigmas = tuple(max(0.3, scale / sp) for sp in spacing)
+                # Cast sp to float to avoid numpy broadcasting ValueError if spacing is an ndarray
+                sigmas = tuple(max(0.3, scale / float(np.ravel(sp)[0])) for sp in spacing)
             else:
                 sigmas = scale
                 
@@ -2535,18 +2536,36 @@ class TEPProcessingService:
                 # Anchor the pin to the actual voxel with the highest score.
                 coords = region.coords
                 if len(coords) > 0:
-                    # coords are [z, y, x] local indices in the bounding box
+                    # coords are [x, y, z] GLOBAL indices in the labeled_mask space
                     scores_in_region = score_map[coords[:, 0], coords[:, 1], coords[:, 2]]
-                    max_idx = np.argmax(scores_in_region)
-                    best_coord_local = coords[max_idx]
-                else:
-                    best_coord_local = region.centroid
                     
-                # Translate from BBox local coordinates to the Cropped-Data coordinate space!
+                    # SENSITIVITY FIX: Frangi scores are often highest at the *edges* of a clot.
+                    # Pure argmax places the pin on the extreme boundary (e.g. skin of the sphere).
+                    # We penalize scores by their distance from the geometric centroid to pull the pin inwards.
+                    # 1. Distances to centroid
+                    cx, cy, cz = region.centroid
+                    distances = np.sqrt((coords[:, 0] - cx)**2 + (coords[:, 1] - cy)**2 + (coords[:, 2] - cz)**2)
+                    max_dist = np.max(distances) + 1e-5
+                    
+                    # 2. Normalized Gaussian distance penalty (closer to center = higher multiplier)
+                    # Sigma = max_dist / 2 (punishes extreme edges by ~86%)
+                    sigma = max_dist / 2.0
+                    distance_weights = np.exp(-(distances**2) / (2 * sigma**2))
+                    
+                    # 3. Weighted argmax
+                    weighted_scores = scores_in_region * distance_weights
+                    
+                    max_idx = np.argmax(weighted_scores)
+                    best_coord_global = coords[max_idx]
+                else:
+                    best_coord_global = region.centroid
+                    
+                # No translation needed! `region.coords` and `region.centroid` are already 
+                # in the Cropped-Data coordinate space (where labeled_mask lives).
                 best_coord = (
-                    best_coord_local[0] + x1,
-                    best_coord_local[1] + y1,
-                    best_coord_local[2] + z1
+                    best_coord_global[0],
+                    best_coord_global[1],
+                    best_coord_global[2]
                 )
                 
                 voi_findings.append({
