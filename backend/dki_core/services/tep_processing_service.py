@@ -1107,10 +1107,14 @@ class TEPProcessingService:
         # intensities = data_3d[mask_3d][sorted_indices] # This is just all voxels sorted
         
         # We need a 1D signal. Let's bin the projections.
+        # Quick check: Is the core Air?
+        voi_hu = data_3d[mask_3d > 0]
+        mean_hu = float(np.mean(voi_hu)) if len(voi_hu) > 0 else 0.0
+        
         # bins = np.arange(np.min(projections), np.max(projections), 1.0/min(spacing)) # 1mm bins
         # If too small, skip
         if length < 5: # < 5mm
-             return {'is_airway': False, 'coherence_val': 0.0, 'fac_mean': fac_mean, 'periodicity_score': 0.0}
+             return {'is_airway': False, 'coherence_val': 0.0, 'fac_mean': fac_mean, 'mean_hu': mean_hu, 'periodicity_score': 0.0}
 
         # Analyze peaks in intensity along the axis (Simulated)
         # True bronchial wall has high-low-high HU (Wall-Air-Wall) or Rhythmic Wall-Cartilage
@@ -1120,10 +1124,6 @@ class TEPProcessingService:
         # 1. High FAC (Air flowing, but here it's empty/air) OR Noisy FAC if very small
         # 2. Very low HU core (-900)
         # 3. Rhythmic wall density
-        
-        # Quick check: Is the core Air?
-        voi_hu = data_3d[mask_3d > 0]
-        mean_hu = np.mean(voi_hu)
         
         is_airway = False
         coherence_val = 0.0
@@ -1213,11 +1213,15 @@ class TEPProcessingService:
                 mask_bool = mask > 0
                 if not np.any(mask_bool):
                     continue
-                # Extract 1D array of only the candidate pixels
-                H_elems = [H[mask_bool] for H in H_elems]
+                # Extract 1D array of only the candidate pixels, spoofed to 3D to trick skimage (1, 1, K)
+                H_elems = [H[mask_bool].reshape(1, 1, -1) for H in H_elems]
                 
             # Compute eigenvalues (skimage returns them in descending absolute order usually)
             eigvals = hessian_matrix_eigvals(H_elems)
+            
+            if mask is not None:
+                # Return back to shape (3, K) instead of (3, 1, 1, K)
+                eigvals = np.array(eigvals).reshape(len(eigvals), -1)
             
             # [PHASE 7] TENSOR TELEMETRY - Check math limits
             if mask is not None and len(eigvals) >= 3 and log_callback:
@@ -2296,19 +2300,38 @@ class TEPProcessingService:
                 
             # Topological map of PA tree vicinity (5 iterations ~ 4-5mm reach for distal branches)
             pa_vicinity = binary_dilation(pa_mask, iterations=3)
+            
+            # Phase 8: Vectorised bounding boxes to avoid O(N * num_defects) full-volume dilation
+            from scipy.ndimage import find_objects
+            slices = find_objects(labeled_defects)
                 
             for i, (score, vol) in enumerate(zip(mean_scores, volumes)):
-                clot_pixels = (labeled_defects == (i + 1))
+                sl = slices[i]
+                if sl is None:
+                    continue
+                    
+                # We extract the specific crop! (padded by 1 for dilation)
+                pad = 1
+                pz = slice(max(0, sl[0].start - pad), min(data.shape[0], sl[0].stop + pad))
+                py = slice(max(0, sl[1].start - pad), min(data.shape[1], sl[1].stop + pad))
+                px = slice(max(0, sl[2].start - pad), min(data.shape[2], sl[2].stop + pad))
+                pad_sl = (pz, py, px)
+                
+                # Bounded cropped arrays
+                crop_labels = labeled_defects[pad_sl]
+                clot_pixels = (crop_labels == (i + 1))
                 
                 # TOPOLOGICAL CHECK: Is this specific clot connected to the PA tree?
-                is_connected = np.any(clot_pixels & pa_vicinity)
+                is_connected = np.any(clot_pixels & pa_vicinity[pad_sl])
                 
                 # AIR CONTAINMENT CHECK: If >50% of clot border touches air, it's NOT intravascular
                 is_air_surrounded = False
                 if is_connected:
                     border = binary_dilation(clot_pixels, iterations=1) & ~clot_pixels
-                    if np.sum(border) > 0:
-                        air_fraction = np.sum(data[border] < -400) / np.sum(border)
+                    border_sum = np.sum(border)
+                    if border_sum > 0:
+                        crop_data = data[pad_sl]
+                        air_fraction = np.sum(crop_data[border] < -400) / border_sum
                         is_air_surrounded = air_fraction > 0.5
                         if is_air_surrounded:
                             is_connected = False  # Override: can't be intravascular if surrounded by air
@@ -2321,8 +2344,13 @@ class TEPProcessingService:
                         score = 0.0  # SUPPRESS: Isolated noise/artifact in the parenchyma
                         
                 if score >= 1.0:  # Lowered slightly since we are averaging the whole mass
-                    candidates[clot_pixels] = True
-                    score_map[clot_pixels] = score
+                    crop_candidates = candidates[pad_sl]
+                    crop_candidates[clot_pixels] = True
+                    candidates[pad_sl] = crop_candidates
+                    
+                    crop_score_map = score_map[pad_sl]
+                    crop_score_map[clot_pixels] = score
+                    score_map[pad_sl] = crop_score_map
         
         if log_callback:
             log_callback(f"   🔍 [DIAG] score_map={score_map.shape}({score_map.ndim}D) candidates={candidates.shape}({candidates.ndim}D) sum={int(np.sum(candidates))}")
