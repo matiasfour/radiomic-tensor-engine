@@ -2115,13 +2115,7 @@ class TEPProcessingService:
         except Exception as e:
             if log_callback: log_callback(f"   ⚠️ Ricci sensor fallback (error: {e})")
             
-        # ── VESSELNESS SENSOR (LOCAL) ──
-        if log_callback: log_callback("   🚀 Computing Multiscale Vesselness (Hessian Tube Sensor) on mini-cube...")
-        try:
-            sub_vmap, _, _, _ = self._compute_multiscale_vesselness(sub_data, spacing, mask=sub_pa_mask)
-            v_map[x_start:x_end, y_start:y_end, z_start:z_end] = sub_vmap
-        except Exception as e:
-            if log_callback: log_callback(f"   ⚠️ Vesselness sensor fallback (error: {e})")
+        # Vesselness will be computed locally per-candidate to save memory and CPU
 
         if log_callback:
             log_callback(f"   🔍 [DIAG] Sensors completed successfully via bounded crop.")
@@ -2167,6 +2161,35 @@ class TEPProcessingService:
         score_map = np.zeros(data.shape, dtype=np.float32)
         score_map[defect_mask] += 1.0  # Base density
         
+        # ── LOCALIZED MULTISCALE VESSELNESS (O(1) OPTIMIZATION) ──
+        # Instead of 94-million voxel 3D Convolutions, we extract just the candidate bounding boxes!
+        from scipy.ndimage import label as scipy_label
+        from skimage.measure import regionprops
+        
+        temp_labels, temp_num = scipy_label(defect_mask)
+        if temp_num > 0:
+            if log_callback: log_callback(f"   🚀 Computing Vesselness locally for {temp_num} candidates...")
+            props = regionprops(temp_labels)
+            for region in props:
+                bbox = region.bbox
+                if len(bbox) == 6:
+                    x1, y1, z1, x2, y2, z2 = bbox
+                    pad = 12
+                    x1_p, x2_p = max(0, x1 - pad), min(data.shape[0], x2 + pad)
+                    y1_p, y2_p = max(0, y1 - pad), min(data.shape[1], y2 + pad)
+                    z1_p, z2_p = max(0, z1 - pad), min(data.shape[2], z2 + pad)
+                    
+                    sub_crop = data[x1_p:x2_p, y1_p:y2_p, z1_p:z2_p]
+                    sub_mask = defect_mask[x1_p:x2_p, y1_p:y2_p, z1_p:z2_p]
+                    
+                    if np.any(sub_mask):
+                        try:
+                            svmap, _, _, _ = self._compute_multiscale_vesselness(sub_crop, spacing, mask=sub_mask)
+                            # Accumulate max vesselness (in case boxes overlap)
+                            v_map[x1_p:x2_p, y1_p:y2_p, z1_p:z2_p] = np.maximum(v_map[x1_p:x2_p, y1_p:y2_p, z1_p:z2_p], svmap)
+                        except Exception:
+                            pass
+                            
         # Only award bonus points IF the pixel is already a candidate defect
         score_map[(v_map > 0.2) & defect_mask] += 1.0
         score_map[(coherence_map < 0.5) & defect_mask] += 1.0
