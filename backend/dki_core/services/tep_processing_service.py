@@ -138,6 +138,118 @@ class TEPProcessingService:
             return array[..., np.newaxis]
         return array
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 3D ANISOTROPIC DIFFUSION FILTER (Phase 1: Edge-Preserving Smoothing)
+    # ═══════════════════════════════════════════════════════════════════════════
+    def _anisotropic_diffusion(self, data, iterations=5, kappa=50, gamma=0.1):
+        """
+        3D Perona-Malik Anisotropic Diffusion Filter.
+        
+        Smooths homogeneous regions while preserving edges (vessel walls, thrombus borders).
+        Unlike Gaussian filters that blur everything equally, this stops diffusion at
+        intensity boundaries, keeping microthrombi contours sharp.
+        
+        Args:
+            data: 3D numpy array
+            iterations: Number of diffusion iterations (default 5)
+            kappa: Conductance coefficient — controls edge sensitivity.
+                   Lower kappa = more edges preserved. 50 is good for CT HU gradients.
+            gamma: Integration constant (0 < gamma <= 0.25 for stability)
+        
+        Returns:
+            Filtered 3D array with preserved edges
+        """
+        img = data.astype(np.float64)
+        
+        for _ in range(iterations):
+            # Compute gradients in all 6 directions (3D lattice neighbors)
+            # North, South, East, West, Up, Down
+            dN = np.roll(img, -1, axis=0) - img  # ∂I/∂x forward
+            dS = np.roll(img,  1, axis=0) - img  # ∂I/∂x backward
+            dE = np.roll(img, -1, axis=1) - img  # ∂I/∂y forward
+            dW = np.roll(img,  1, axis=1) - img  # ∂I/∂y backward
+            dU = np.roll(img, -1, axis=2) - img  # ∂I/∂z forward
+            dD = np.roll(img,  1, axis=2) - img  # ∂I/∂z backward
+            
+            # Conductance function: c = exp(-(∇I/κ)²)
+            # Exponential form preserves wide regions, blocks at edges
+            cN = np.exp(-(dN / kappa) ** 2)
+            cS = np.exp(-(dS / kappa) ** 2)
+            cE = np.exp(-(dE / kappa) ** 2)
+            cW = np.exp(-(dW / kappa) ** 2)
+            cU = np.exp(-(dU / kappa) ** 2)
+            cD = np.exp(-(dD / kappa) ** 2)
+            
+            # Update: I_{t+1} = I_t + γ * Σ(c * ∇I)
+            img += gamma * (cN * dN + cS * dS + cE * dE + cW * dW + cU * dU + cD * dD)
+        
+        return img.astype(data.dtype)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ISOTROPIC RESAMPLING UTILITIES (Phase 1: Solid Block)
+    # ═══════════════════════════════════════════════════════════════════════════
+    def _resample_isotropic(self, volume, spacing, target_spacing=1.0, order=3, log_callback=None):
+        """
+        Resample volume to isotropic voxels (target_spacing x target_spacing x target_spacing mm).
+        
+        Args:
+            volume: 3D numpy array
+            spacing: Original voxel spacing [X, Y, Z] in mm
+            target_spacing: Target isotropic spacing (default 1.0mm)
+            order: Spline interpolation order (3=cubic for data, 0=nearest for masks)
+            log_callback: Optional logging callback
+        
+        Returns:
+            resampled_volume, zoom_factors, original_shape
+        """
+        from scipy.ndimage import zoom
+        
+        original_shape = volume.shape
+        zoom_factors = np.array(spacing) / target_spacing
+        
+        # Skip if already isotropic (all zoom factors ~1.0)
+        if np.allclose(zoom_factors, 1.0, atol=0.05):
+            if log_callback:
+                log_callback(f"   ℹ️ Volume already isotropic ({spacing}), skipping resampling.")
+            return volume, zoom_factors, original_shape
+        
+        if log_callback:
+            log_callback(f"   🔬 Isotropic Resampling: {original_shape} × spacing={spacing} → target={target_spacing}mm³")
+        
+        resampled = zoom(volume.astype(np.float64), zoom_factors, order=order)
+        
+        if log_callback:
+            log_callback(f"   ✅ Resampled: {original_shape} → {resampled.shape} (zoom_factors={np.round(zoom_factors, 3)})")
+        
+        return resampled, zoom_factors, original_shape
+
+    def _reverse_isotropic(self, volume, original_shape, order=0):
+        """
+        Reverse the isotropic resampling to match original data dimensions.
+        
+        Args:
+            volume: 3D array in isotropic space
+            original_shape: Target shape to restore (from pre-resampling)
+            order: Interpolation order (0=nearest for masks, 1=linear for maps)
+        
+        Returns:
+            Volume restored to original_shape
+        """
+        from scipy.ndimage import zoom
+        
+        # If shapes already match, skip
+        if volume.shape[:3] == original_shape[:3]:
+            return volume
+        
+        reverse_zoom = np.array(original_shape[:3], dtype=np.float64) / np.array(volume.shape[:3], dtype=np.float64)
+        
+        # For RGB/multi-channel arrays, only zoom spatial dimensions
+        if volume.ndim > 3 and len(original_shape) > 3:
+            full_zoom = list(reverse_zoom) + [1.0] * (volume.ndim - 3)
+            return zoom(volume.astype(np.float64), full_zoom, order=order).astype(volume.dtype)
+        
+        return zoom(volume.astype(np.float64), reverse_zoom, order=order).astype(volume.dtype)
+
     def process_study(self, data, affine, kvp=None, mas=None, spacing=None, log_callback=None,
                        domain_mask=None, is_contrast_optimal=None, is_non_contrast=False,
                        mat_filepath=None):
@@ -224,6 +336,32 @@ class TEPProcessingService:
         voxel_volume_cm3 = voxel_volume_mm3 / 1000.0
         
         # ═══════════════════════════════════════════════════════════════════════════
+        # STEP -1: ISOTROPIC RESAMPLING (The Solid Block)
+        # Converts anisotropic voxels to perfect 1x1x1mm cubes before any analysis.
+        # This eliminates "ghosting" between slices and ensures the Hessian eigenvalues
+        # are symmetric in all directions.
+        # ═══════════════════════════════════════════════════════════════════════════
+        if log_callback:
+            log_callback("Step -1: Isotropic Resampling (Building Solid Block)...")
+        
+        spacing_original = np.array(spacing).copy()  # Backup for reverse mapping
+        
+        data, iso_zoom_factors, iso_original_shape = self._resample_isotropic(
+            data, spacing, target_spacing=1.0, order=3, log_callback=log_callback
+        )
+        
+        # Resample domain_mask with nearest-neighbor to keep it binary
+        if domain_mask is not None:
+            domain_mask = self._resample_isotropic(
+                domain_mask.astype(np.float32), spacing_original, target_spacing=1.0, order=0
+            )[0] > 0.5
+        
+        # After resampling, all spacing is now 1.0mm uniform
+        spacing = np.array([1.0, 1.0, 1.0])
+        voxel_volume_mm3 = 1.0  # Exactly 1mm³ per voxel
+        voxel_volume_cm3 = 0.001
+        
+
         # STEP 0: Apply Hounsfield exclusion masks
         # ═══════════════════════════════════════════════════════════════════════════
         if log_callback:
@@ -384,7 +522,53 @@ class TEPProcessingService:
         if log_callback:
             log_callback("Step 6.5/9: Calculating Flow Coherence (CI) map...")
             
-        coherence_map = self._compute_flow_coherence(working_data, pa_mask, log_callback=log_callback, spacing=spacing)
+        coherence_map, vector_field = self._compute_flow_coherence(working_data, pa_mask, log_callback=log_callback, spacing=spacing)
+        
+        # ═══════════════════════════════════════════════════════════════════════════
+        # STEP 6.2: FAC-based PA Tree Cleaning (Anisotropy Gate)
+        # Removes parenchymal noise from PA mask using flow directionality.
+        # Voxels with low FAC = chaotic gradients = not real vessels.
+        # ═══════════════════════════════════════════════════════════════════════════
+        if not is_non_contrast:
+            if log_callback:
+                log_callback("Step 6.2: FAC-based PA Tree Cleaning (Anisotropy Gate)...")
+            
+            pa_voxels_before = int(np.sum(pa_mask))
+            fac_threshold = 0.3
+            
+            clean_pa = pa_mask & (fac_map >= fac_threshold)
+            pa_voxels_after = int(np.sum(clean_pa))
+            ratio = pa_voxels_after / max(pa_voxels_before, 1)
+            
+            if ratio < 0.4:
+                # Safety: threshold too aggressive, relax
+                fac_threshold = 0.15
+                clean_pa = pa_mask & (fac_map >= fac_threshold)
+                pa_voxels_after = int(np.sum(clean_pa))
+                ratio = pa_voxels_after / max(pa_voxels_before, 1)
+                if log_callback:
+                    log_callback(f"   ⚠️ FAC threshold relaxed to {fac_threshold} (ratio={ratio:.2f})")
+            
+            if ratio < 0.2:
+                # Emergency: FAC filter would destroy PA tree, skip
+                warnings_list.append("FAC cleaning disabled: would remove >80% of PA tree")
+                if log_callback:
+                    log_callback("   ❌ FAC cleaning DISABLED: would remove >80% of PA tree")
+            else:
+                pa_mask = clean_pa
+                if log_callback:
+                    log_callback(f"   ✨ FAC Cleaning: {pa_voxels_before:,} → {pa_voxels_after:,} voxels (FAC≥{fac_threshold}, kept {ratio*100:.0f}%)")
+        
+        # ═══════════════════════════════════════════════════════════════════════════
+        # STEP 6.3: Compute Vectorial Flow Disruption (Tractography Proxy)
+        # Uses the eigenvector field from Step 6.5 to detect flow alignment
+        # ═══════════════════════════════════════════════════════════════════════════
+        if log_callback:
+            log_callback("Step 6.3: Computing Vectorial Flow Disruption (Tractography Proxy)...")
+        
+        flow_alignment_map = self._compute_vectorial_disruption(
+            vector_field, pa_mask, log_callback=log_callback
+        )
         
         # ═══════════════════════════════════════════════════════════════════════════
         # STEP 7: Detect filling defects with MK/FAC signature + CONTRAST INHIBITOR
@@ -400,7 +584,8 @@ class TEPProcessingService:
             centerline=centerline,  # Pass centerline for proximity validation
             centerline_info=centerline_info,
             z_guard_slices=True,  # Enable Z-anatomical guard
-            spacing=spacing       # Pass voxel spacing for VOI analysis
+            spacing=spacing,      # Pass voxel spacing for VOI analysis
+            flow_alignment_map=flow_alignment_map  # Phase 2: Tractography disruption sensor
         )
         
         # ═══════════════════════════════════════════════════════════════════════════
@@ -542,7 +727,7 @@ class TEPProcessingService:
             log_callback("Step 9.8/9: Generating pseudocolor HU map (Phase 6)...")
         pseudocolor_map = self._generate_pseudocolor_lut(working_data, domain_mask=(lung_mask | pa_mask))
         
-        # Expand masks to original size
+        # Expand masks to original isotropic size (crop → full isotropic volume)
         pa_mask_full = self._expand_to_original(pa_mask, data.shape, crop_info)
         pseudocolor_map_full = self._expand_to_original(pseudocolor_map, data.shape, crop_info)
         thrombus_mask_full = self._expand_to_original(thrombus_mask, data.shape, crop_info)
@@ -555,9 +740,36 @@ class TEPProcessingService:
         # Expand ROI heatmap (always generated)
         roi_heatmap_full = self._expand_to_original(roi_heatmap, (*data.shape, 3), crop_info)
         
-        # Calculate total volumes
-        total_clot_volume = np.sum(thrombus_mask_full) * voxel_volume_cm3
-        pa_volume = np.sum(pa_mask_full) * voxel_volume_cm3
+        # ═══════════════════════════════════════════════════════════════════════════
+        # REVERSE ISOTROPIC: Return all outputs to original voxel grid
+        # This ensures synchronization with frontend UI and DICOM coordinates.
+        # ═══════════════════════════════════════════════════════════════════════════
+        if not np.allclose(iso_zoom_factors, 1.0, atol=0.05):
+            if log_callback:
+                log_callback(f"   🔄 Reverse Isotropic: {data.shape} → {iso_original_shape}")
+            
+            # Binary masks (order=0, nearest neighbor)
+            pa_mask_full = self._reverse_isotropic(pa_mask_full, iso_original_shape, order=0) > 0.5
+            thrombus_mask_full = self._reverse_isotropic(thrombus_mask_full, iso_original_shape, order=0) > 0.5
+            lung_mask_full = self._reverse_isotropic(lung_mask_full, iso_original_shape, order=0) > 0.5
+            centerline_full = self._reverse_isotropic(centerline_full, iso_original_shape, order=0) > 0.5
+            
+            # Float maps (order=1, linear interpolation)
+            mk_map_full = self._reverse_isotropic(mk_map_full, iso_original_shape, order=1)
+            fac_map_full = self._reverse_isotropic(fac_map_full, iso_original_shape, order=1)
+            pseudocolor_map_full = self._reverse_isotropic(pseudocolor_map_full, (*iso_original_shape, 3), order=0)
+            
+            # RGB heatmaps (order=0 to avoid color blending artifacts)
+            heatmap_full = self._reverse_isotropic(heatmap_full, (*iso_original_shape, 3), order=0)
+            roi_heatmap_full = self._reverse_isotropic(roi_heatmap_full, (*iso_original_shape, 3), order=0)
+            
+            # Restore original data shape reference for downstream calculations
+            data = self._reverse_isotropic(data, iso_original_shape, order=1)
+        
+        # Calculate total volumes (use original spacing for physical accuracy)
+        voxel_volume_cm3_original = np.prod(spacing_original) / 1000.0
+        total_clot_volume = np.sum(thrombus_mask_full) * voxel_volume_cm3_original
+        pa_volume = np.sum(pa_mask_full) * voxel_volume_cm3_original
         
         # Calculate uncertainty
         uncertainty_sigma = self._calculate_uncertainty(data, pa_mask_full, spacing, thrombus_mask_full)
@@ -1204,7 +1416,7 @@ class TEPProcessingService:
         vesselness_max = np.zeros_like(data, dtype=np.float32)
         l1_last, l2_last, l3_last = None, None, None
         
-        for scale in [0.5, 1.0]:  # 0.5 captures 1-2 pixel distal branches
+        for scale in [1.0, 2.0, 3.0]:  # Physical mm scales: 1mm, 2mm, 3mm vessel radii (isotropic space)
             # Compute Hessian matrix for current scale (Separable Gaussians are fast: ~2s)
             # Apply voxel spacing correction if provided so scaling is isotropic
             if spacing is not None and len(spacing) >= 3:
@@ -1799,11 +2011,11 @@ class TEPProcessingService:
         gy = sobel(data, axis=1, mode='reflect')
         gz = sobel(data, axis=2, mode='reflect')
         
-        # Smooth gradients to reduce noise
-        sigma = 1.5
-        gx = gaussian_filter(gx, sigma=sigma)
-        gy = gaussian_filter(gy, sigma=sigma)
-        gz = gaussian_filter(gz, sigma=sigma)
+        # Smooth gradients using edge-preserving Anisotropic Diffusion (Perona-Malik)
+        # Replaces Gaussian which blurs microthrombi borders
+        gx = self._anisotropic_diffusion(gx, iterations=5, kappa=50, gamma=0.1)
+        gy = self._anisotropic_diffusion(gy, iterations=5, kappa=50, gamma=0.1)
+        gz = self._anisotropic_diffusion(gz, iterations=5, kappa=50, gamma=0.1)
         
         # Calculate gradient magnitude
         grad_mag = np.sqrt(gx**2 + gy**2 + gz**2)
@@ -1927,9 +2139,10 @@ class TEPProcessingService:
         n_voxels = len(coords[0])
         
         coherence_map = np.zeros_like(data_proc, dtype=np.float32)
+        vector_field = np.zeros((*data_proc.shape, 3), dtype=np.float32)
         
         if n_voxels == 0:
-            return coherence_map
+            return coherence_map, vector_field
 
         # Vectorized tensor construction
         tensors = np.zeros((n_voxels, 3, 3), dtype=np.float32)
@@ -1940,13 +2153,26 @@ class TEPProcessingService:
         tensors[:, 0, 2] = tensors[:, 2, 0] = Sxz[coords]
         tensors[:, 1, 2] = tensors[:, 2, 1] = Syz[coords]
         
-        # Eigendecomposition (vectorized)
-        # eigvalsh returns eigenvalues in ascending order
-        evals = eigvalsh(tensors)
+        # Eigendecomposition (vectorized) — Phase 2: extract BOTH eigenvalues AND eigenvectors
+        # eigh returns eigenvalues in ascending order + eigenvectors as columns
+        evals, evecs = np.linalg.eigh(tensors)
         
         mu1 = evals[:, 2] # Largest
         mu2 = evals[:, 1]
         mu3 = evals[:, 0] # Smallest
+        
+        # Principal vessel direction = eigenvector of smallest eigenvalue (index 0)
+        # In a tube, the smallest eigenvalue's eigenvector points ALONG the vessel
+        # evecs shape: (n_voxels, 3, 3) — columns are eigenvectors
+        principal_dirs = evecs[:, :, 0]  # (n_voxels, 3) — direction along vessel
+        
+        # Normalize principal directions (safety)
+        dir_norms = np.linalg.norm(principal_dirs, axis=1, keepdims=True)
+        dir_norms = np.maximum(dir_norms, 1e-10)
+        principal_dirs = principal_dirs / dir_norms
+        
+        # Map principal directions back to 3D volume as vector field
+        vector_field[coords[0], coords[1], coords[2], :] = principal_dirs
         
         # Coherence Index
         # CI = ((mu1 - mu3) / (mu1 + mu3 + eps)) ^ 2
@@ -1994,8 +2220,69 @@ class TEPProcessingService:
             if n_voxels > 0:
                 log_callback(f"   Coherence (CI): Mean={np.mean(ci_values):.2f}, Disrupted (<0.4)={np.sum(ci_values < 0.4)/n_voxels*100:.1f}%")
 
-        return coherence_map
+        return coherence_map, vector_field
     
+    def _compute_vectorial_disruption(self, vector_field, mask, log_callback=None):
+        """
+        Phase 2: Compute Flow Alignment Map (Tractography Proxy).
+        
+        Measures how well neighboring vessel direction vectors align with each other.
+        Perfectly aligned vectors (healthy laminar flow) → 1.0.
+        Chaotic/orthogonal vectors (thrombus collision) → 0.0.
+        
+        Uses the average absolute dot product of each voxel's principal direction
+        vector with its 6 immediate neighbors (±X, ±Y, ±Z).
+        
+        Args:
+            vector_field: 4D array (X, Y, Z, 3) of unit direction vectors
+            mask: 3D boolean mask of region to analyze
+            log_callback: Optional logging callback
+        
+        Returns:
+            flow_alignment_map: 3D float array (0=disrupted, 1=aligned)
+        """
+        if log_callback:
+            log_callback("   🧭 Computing Vectorial Flow Disruption (neighbor dot products)...")
+        
+        flow_alignment = np.zeros(vector_field.shape[:3], dtype=np.float32)
+        
+        # Only process masked voxels
+        if not np.any(mask):
+            return flow_alignment
+        
+        # Compute dot products with all 6 neighbors
+        dot_sum = np.zeros_like(flow_alignment)
+        neighbor_count = np.zeros_like(flow_alignment)
+        
+        for axis in range(3):
+            for shift in [-1, 1]:
+                # Shift the vector field along the axis
+                shifted = np.roll(vector_field, shift, axis=axis)
+                
+                # Dot product: sum(v_center * v_neighbor) along the vector dimension
+                dot = np.abs(np.sum(vector_field * shifted, axis=3))
+                
+                # Only count where both center AND neighbor have valid vectors
+                shifted_mask = np.roll(mask, shift, axis=axis)
+                valid = mask & shifted_mask
+                
+                dot_sum[valid] += dot[valid]
+                neighbor_count[valid] += 1.0
+        
+        # Average over valid neighbors
+        has_neighbors = neighbor_count > 0
+        flow_alignment[has_neighbors] = dot_sum[has_neighbors] / neighbor_count[has_neighbors]
+        
+        # Clip to [0, 1]
+        flow_alignment = np.clip(flow_alignment, 0.0, 1.0)
+        
+        if log_callback:
+            if np.any(mask):
+                fa_values = flow_alignment[mask]
+                log_callback(f"   🧭 Flow Alignment: Mean={np.mean(fa_values):.3f}, Disrupted (<0.4)={np.sum(fa_values < 0.4):,} voxels")
+        
+        return flow_alignment
+
     # ═══════════════════════════════════════════════════════════════════════════
     # ENHANCED: Thrombus Detection with SCORING SYSTEM + CENTERLINE VALIDATION
     # ═══════════════════════════════════════════════════════════════════════════
@@ -2137,7 +2424,7 @@ class TEPProcessingService:
 
     def _detect_filling_defects_enhanced(self, data, pa_mask, mk_map, fac_map, coherence_map, exclusion_mask, 
                                      lung_mask, log_callback, apply_contrast_inhibitor, is_non_contrast, centerline, 
-                                     centerline_info, z_guard_slices, spacing):
+                                     centerline_info, z_guard_slices, spacing, flow_alignment_map=None):
         
         import traceback as tb
         
@@ -2311,6 +2598,21 @@ class TEPProcessingService:
         
         if log_callback and voxels_blocked > 0:
             log_callback(f"   🛡️ Visual Noise Filter blocked {voxels_blocked:,} artifact voxels")
+        
+        # Gate T: Tractography Gate (Phase 2: Vectorial Disruption Signature)
+        # Low flow alignment + Low FAC + High MK = definitive PE signature
+        if flow_alignment_map is not None:
+            fa_crop = flow_alignment_map[defect_mask]
+            fac_crop = fac_map[defect_mask]
+            mk_crop = mk_map[defect_mask]
+            
+            tractography_gate = (fa_crop < 0.4) & (fac_crop < 0.3) & (mk_crop > 1.0)
+            base_scores[tractography_gate] *= 2.0
+            
+            if log_callback:
+                n_boosted = int(np.sum(tractography_gate))
+                if n_boosted > 0:
+                    log_callback(f"   🧭 Tractography Gate: {n_boosted:,} voxels boosted ×2.0 (disrupted flow + low FAC + high MK)")
             
         # Re-assign scores back to the 3D volume
         score_map[defect_mask] = base_scores
