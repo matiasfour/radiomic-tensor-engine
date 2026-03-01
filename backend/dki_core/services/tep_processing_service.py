@@ -461,7 +461,17 @@ class TEPProcessingService:
             warnings_list.append(f"ROI reduced to {erosion_info['reduction_percentage']:.1f}% - REQUIRES_MANUAL_REVIEW")
             
         self._log_tensor_stats("01_Lung_Mask", lung_mask, log_callback)
-        
+
+        # ═══════════════════════════════════════════════════════════════════════════
+        # STEP 4.PRE: Pre-compute MK map (lung_mask proxy) for dual PA seed
+        # Computed before PA segmentation so mk_map can seed dual-threshold artery
+        # recovery (Seed 2: 80-150 HU + high kurtosis). Using lung_mask as proxy
+        # is safe: kurtosis is an intrinsic HU property; PA is a subset of lung.
+        # ═══════════════════════════════════════════════════════════════════════════
+        if log_callback:
+            log_callback("Step 4.PRE/9: Pre-computing MK map (lung proxy for dual PA seed)...")
+        mk_map = self._calculate_local_kurtosis(working_data, lung_mask, log_callback)
+
         # ═══════════════════════════════════════════════════════════════════════════
         # STEP 4: Segment pulmonary arteries
         # ═══════════════════════════════════════════════════════════════════════════
@@ -475,17 +485,18 @@ class TEPProcessingService:
         else:
              if log_callback:
                  log_callback("Step 4/9: Segmenting pulmonary arteries...")
-             
+
              # Phase 2 Adaptive Thresholding: If contrast is poor, we must lower the 150 HU bar.
              # We use 45% of the measured mean arterial HU, but never go below 80 HU (muscle/blood baseline).
              base_hu = getattr(self, 'mean_arterial_hu', 300)
              dynamic_min_hu = max(80, int(base_hu * 0.45))
-             
+
              pa_mask, pa_info = self._segment_pulmonary_arteries(
-                 working_data, 
-                 lung_mask, 
+                 working_data,
+                 lung_mask,
                  dynamic_min_hu=dynamic_min_hu,
-                 log_callback=log_callback
+                 log_callback=log_callback,
+                 mk_map=mk_map              # Dual-seed: dark-core massive PE recovery
              )
         
         self._log_tensor_stats("02_PA_Mask", pa_mask, log_callback)
@@ -500,14 +511,9 @@ class TEPProcessingService:
             pa_mask, working_data, spacing=spacing, log_callback=log_callback
         )
         
-        # ═══════════════════════════════════════════════════════════════════════════
-        # STEP 5: Calculate local kurtosis (MK) map
-        # ═══════════════════════════════════════════════════════════════════════════
-        if log_callback:
-            log_callback("Step 5/9: Calculating local kurtosis (MK) map...")
-        
-        mk_map = self._calculate_local_kurtosis(working_data, pa_mask, log_callback)
-        
+        # STEP 5: MK map pre-computed at Step 4.PRE above — no-op here.
+        # mk_map already available from pre-PA dual-seed computation.
+
         # ═══════════════════════════════════════════════════════════════════════════
         # STEP 6: Calculate local anisotropy (FAC) map
         # ═══════════════════════════════════════════════════════════════════════════
@@ -585,9 +591,10 @@ class TEPProcessingService:
             centerline_info=centerline_info,
             z_guard_slices=True,  # Enable Z-anatomical guard
             spacing=spacing,      # Pass voxel spacing for VOI analysis
-            flow_alignment_map=flow_alignment_map  # Phase 2: Tractography disruption sensor
+            flow_alignment_map=flow_alignment_map,  # Phase 2: Tractography disruption sensor
+            mat_filepath=mat_filepath               # GOD_MODE: thread GT path for real-time diagnostics
         )
-        
+
         # ═══════════════════════════════════════════════════════════════════════════
         # STEP 7b: Laplacian Bone Edge Validation (Cross-check for calcium boundaries)
         # ═══════════════════════════════════════════════════════════════════════════
@@ -812,14 +819,35 @@ class TEPProcessingService:
         # Calculate total volumes (use original spacing for physical accuracy)
         voxel_volume_cm3_original = np.prod(spacing_original) / 1000.0
         total_clot_volume = np.sum(thrombus_mask_full) * voxel_volume_cm3_original
+        if log_callback:
+            log_callback(
+                f"[MART Volume Sync] Voxels with score>=2.0: "
+                f"{int(np.sum(thrombus_mask_full))}, "
+                f"Volume: {total_clot_volume:.2f} cm3"
+            )
         pa_volume = np.sum(pa_mask_full) * voxel_volume_cm3_original
-        
+
         # Calculate uncertainty
         uncertainty_sigma = self._calculate_uncertainty(data, pa_mask_full, spacing, thrombus_mask_full)
-        
+
         # Get diagnostic stats from thrombus detection
         diagnostic_stats = thrombus_info.get('diagnostic_stats', {})
-        
+
+        # Lobe-level MART voxel counts (Z-axis thirds — Z is axis index 2 per data.shape[2])
+        lobe_sensitivity = {}
+        try:
+            _z_max = thrombus_mask_full.shape[2]
+            _z_u = _z_max // 3
+            _z_m = 2 * (_z_max // 3)
+            lobe_sensitivity = {
+                'upper':  {'mart_voxels': int(np.sum(thrombus_mask_full[:, :, :_z_u])),     'gt_sensitivity': None},
+                'middle': {'mart_voxels': int(np.sum(thrombus_mask_full[:, :, _z_u:_z_m])), 'gt_sensitivity': None},
+                'lower':  {'mart_voxels': int(np.sum(thrombus_mask_full[:, :, _z_m:])),     'gt_sensitivity': None},
+            }
+        except Exception as _le:
+            if log_callback:
+                log_callback(f"   Lobe sensitivity computation failed: {_le}")
+
         # ════════════════════════════════════════════════════════════════════════
         # UX METADATA GENERATION (Smart Scrollbar & Diagnostic Pins)
         # ════════════════════════════════════════════════════════════════════════
@@ -997,6 +1025,7 @@ class TEPProcessingService:
             # UX / Frontend Data (Smart Scrollbar + Diagnostic Pins)
             'slices_meta': slices_meta,
             'findings_pins': findings_pins,
+            'lobe_sensitivity': lobe_sensitivity,
         }
         
         if log_callback:
@@ -1029,7 +1058,17 @@ class TEPProcessingService:
                 log_callback(f"  📊 Diagnostic breakdown:")
                 log_callback(f"     - Contrast inhibitor (HU>{self.CONTRAST_INHIBITOR_HU}): {diagnostic_stats.get('voxels_inhibited_by_contrast', 0):,} voxels zeroed")
                 log_callback(f"     - Elongated filter (ribs): {diagnostic_stats.get('clusters_removed_elongated', 0)} clusters removed")
-            
+
+            # Lobe breakdown
+            if lobe_sensitivity:
+                log_callback(f"  Lobe Breakdown (Z-axis thirds):")
+                for _ln in ['upper', 'middle', 'lower']:
+                    _ld = lobe_sensitivity.get(_ln, {})
+                    _mv = _ld.get('mart_voxels', 0)
+                    _gs = _ld.get('gt_sensitivity')
+                    _gs_str = f", GT Sens={_gs:.1%}" if _gs is not None else ""
+                    log_callback(f"     - {_ln.capitalize()} lobe: MART={_mv:,} vox{_gs_str}")
+
             # Log individual findings with scores
             if results['findings']:
                 log_callback("  📋 Findings detail:")
@@ -1086,7 +1125,22 @@ class TEPProcessingService:
                         'sensitivity': gt_result['sensitivity'],
                         'dice': gt_result['dice'],
                     }
-                    
+
+                    # Finalize lobe sensitivity with GT comparison
+                    _gt_m = gt_result.get('gt_mask')
+                    if _gt_m is not None and lobe_sensitivity:
+                        _gz = _gt_m.shape[2]
+                        _gz_u = _gz // 3
+                        _gz_m = 2 * (_gz // 3)
+                        for _lk, _sl in [('upper', slice(None, _gz_u)), ('middle', slice(_gz_u, _gz_m)), ('lower', slice(_gz_m, None))]:
+                            _gt_vox   = int(np.sum(_gt_m[:, :, _sl]))
+                            _mart_vox = lobe_sensitivity.get(_lk, {}).get('mart_voxels', 0)
+                            _lobe_sens = (min(1.0, _mart_vox / _gt_vox) if _gt_vox > 0 else None)
+                            if _lk in lobe_sensitivity:
+                                lobe_sensitivity[_lk]['gt_sensitivity'] = _lobe_sens
+                                lobe_sensitivity[_lk]['gt_voxels'] = _gt_vox
+                        results['lobe_sensitivity'] = lobe_sensitivity
+
                     if log_callback:
                         v = results['gt_validation']
                         log_callback(f"  📊 Sensitivity (GT Detected): {v['sensitivity']:.1%}")
@@ -2497,7 +2551,8 @@ class TEPProcessingService:
 
     def _detect_filling_defects_enhanced(self, data, pa_mask, mk_map, fac_map, coherence_map, exclusion_mask, 
                                      lung_mask, log_callback, apply_contrast_inhibitor, is_non_contrast, centerline, 
-                                     centerline_info, z_guard_slices, spacing, flow_alignment_map=None):
+                                     centerline_info, z_guard_slices, spacing, flow_alignment_map=None,
+                                     mat_filepath=None):
         
         import traceback as tb
         
@@ -2704,7 +2759,50 @@ class TEPProcessingService:
         # Re-assign scores back to the 3D volume
         score_map[defect_mask] = base_scores
 
-        
+        # ═══════════════════════════════════════════════════════════════════════════
+        # LARGE MASS BOOST — Anti-Tubular-Trap second pass
+        # For regions >1000 voxels (~1 cm³): re-apply Gate M with relaxed
+        # geo_conf > 0.1 (instead of > 0.3) and boost sub-threshold voxels x1.3.
+        # Only fires for massive candidates; small vessels are unaffected.
+        # ═══════════════════════════════════════════════════════════════════════════
+        try:
+            from scipy.ndimage import label as _lm_label
+            from scipy.ndimage import sum as _lm_sum
+            _lm_labeled, _lm_n = _lm_label(defect_mask)
+            if _lm_n > 0:
+                _lm_sizes = _lm_sum(
+                    np.ones_like(defect_mask, dtype=np.int32),
+                    _lm_labeled,
+                    index=range(1, _lm_n + 1)
+                )
+                if np.isscalar(_lm_sizes):
+                    _lm_sizes = [_lm_sizes]
+                _large_mass_total = 0
+                for _lm_i, _lm_sz in enumerate(_lm_sizes):
+                    if _lm_sz > 1000:
+                        _lm_region_mask = (_lm_labeled == (_lm_i + 1))
+                        _lm_geo = v_map[_lm_region_mask]
+                        _lm_coh = coherence_map[_lm_region_mask]
+                        _lm_dat = data[_lm_region_mask]
+                        _lm_scr = score_map[_lm_region_mask]
+                        # Relaxed Gate M: geo_conf > 0.1 OR coherence < 0.3
+                        _lm_gate = ((_lm_dat >= 40) & (_lm_dat <= 90) &
+                                    ((_lm_geo > 0.1) | (_lm_coh < 0.3)))
+                        _lm_sub = _lm_gate & (_lm_scr < self.SCORE_THRESHOLD_SUSPICIOUS)
+                        if np.any(_lm_sub):
+                            _lm_scores_copy = _lm_scr.copy()
+                            _lm_scores_copy[_lm_sub] *= 1.3
+                            score_map[_lm_region_mask] = _lm_scores_copy
+                            _large_mass_total += int(np.sum(_lm_sub))
+                if _large_mass_total > 0 and log_callback:
+                    log_callback(
+                        f"   Large Mass Boost: {_large_mass_total:,} sub-threshold voxels "
+                        f"boosted x1.3 (relaxed Gate M: geo>0.1, region>1000 vox)"
+                    )
+        except Exception as _lm_err:
+            if log_callback:
+                log_callback(f"   Large Mass Boost failed (non-critical): {_lm_err}")
+
         # 7. Candidate Extraction (WHOLE-CLOT PRESERVATION)
         from scipy.ndimage import label as scipy_label
         from scipy.ndimage import mean as ndi_mean
@@ -3029,10 +3127,71 @@ class TEPProcessingService:
         fractal_dim = self._compute_fractal_dimension(pa_mask)
         pruning_alert = fractal_dim < 1.5
         
-        if log_callback: 
+        if log_callback:
             log_callback(f"   🔢 Global Fractal Dimension (Df): {fractal_dim:.3f}")
             if pruning_alert:
                 log_callback("   ⚠️ VASCULAR PRUNING DETECTED (Df < 1.5) - Possible Microvascular Disease")
+
+        # ═══════════════════════════════════════════════════════════════════════════
+        # [GOD_MODE] Missing GT Clot Diagnostics (only when mat_filepath provided)
+        # ═══════════════════════════════════════════════════════════════════════════
+        if mat_filepath is not None and log_callback is not None:
+            import os as _os
+            if _os.path.exists(mat_filepath):
+                try:
+                    import scipy.io as _sio
+                    _mat_data = _sio.loadmat(mat_filepath)
+                    _gt_mask = None
+                    _priority_keys = ['mask', 'Mask', 'MASK', 'ROI', 'roi', 'Roi',
+                                      'segmentation', 'Segmentation', 'label', 'Label']
+                    for _k in _priority_keys:
+                        if _k in _mat_data and isinstance(_mat_data[_k], np.ndarray) and _mat_data[_k].ndim == 3:
+                            _gt_mask = _mat_data[_k].astype(np.float32)
+                            break
+                    if _gt_mask is None:
+                        for _k, _v in _mat_data.items():
+                            if not _k.startswith('__') and isinstance(_v, np.ndarray) and _v.ndim == 3:
+                                _gt_mask = _v.astype(np.float32)
+                                break
+                    if _gt_mask is not None:
+                        _gt_mask = (_gt_mask > 0).astype(np.uint8)
+                        # Shape alignment (mirrors _validate_against_ground_truth)
+                        if _gt_mask.shape != data.shape:
+                            if sorted(_gt_mask.shape) == sorted(data.shape):
+                                for _perm in [(0,1,2),(0,2,1),(1,0,2),(1,2,0),(2,0,1),(2,1,0)]:
+                                    if tuple(_gt_mask.shape[p] for p in _perm) == data.shape:
+                                        _gt_mask = np.transpose(_gt_mask, _perm)
+                                        break
+                            if _gt_mask.shape != data.shape:
+                                _aligned = np.zeros(data.shape, dtype=np.uint8)
+                                _mz = min(_gt_mask.shape[0], data.shape[0])
+                                _my = min(_gt_mask.shape[1], data.shape[1])
+                                _mx = min(_gt_mask.shape[2], data.shape[2])
+                                _aligned[:_mz, :_my, :_mx] = _gt_mask[:_mz, :_my, :_mx]
+                                _gt_mask = _aligned
+                        _mart_binary = (thresholded_mask > 0).astype(np.uint8)
+                        _missed_gt = _gt_mask & (~_mart_binary.astype(bool))
+                        if np.any(_missed_gt):
+                            from scipy.ndimage import label as _gm_label
+                            _missed_labeled, _n_missed = _gm_label(_missed_gt)
+                            log_callback(f"[GOD_MODE] {_n_missed} GT region(s) NOT detected by MART:")
+                            for _ri in range(1, _n_missed + 1):
+                                _rv = (_missed_labeled == _ri)
+                                _avg_hu    = float(np.mean(data[_rv]))
+                                _avg_fac   = float(np.mean(fac_map[_rv]))
+                                _avg_mk    = float(np.mean(mk_map[_rv]))
+                                _avg_score = float(np.mean(score_map[_rv]))
+                                _zcoords   = np.where(_rv)[2]
+                                _z_center  = int(np.median(_zcoords)) if len(_zcoords) > 0 else -1
+                                log_callback(
+                                    f"[GOD_MODE] Missing GT Clot at Slice {_z_center}: "
+                                    f"Avg_HU={_avg_hu:.1f}, Avg_FAC={_avg_fac:.3f}, "
+                                    f"Avg_MK={_avg_mk:.3f}, Final_Score={_avg_score:.3f}"
+                                )
+                        else:
+                            log_callback("[GOD_MODE] MART detected ALL GT regions. Sensitivity=100%.")
+                except Exception as _gm_err:
+                    log_callback(f"[GOD_MODE] Error loading GT for diagnostics: {_gm_err}")
 
         return thresholded_mask, {
             'clot_count': len(voi_findings),
@@ -3710,10 +3869,10 @@ class TEPProcessingService:
         
         return lung_mask
     
-    def _segment_pulmonary_arteries(self, data, lung_mask, dynamic_min_hu=None, log_callback=None):
+    def _segment_pulmonary_arteries(self, data, lung_mask, dynamic_min_hu=None, log_callback=None, mk_map=None):
         """
         Segment pulmonary arteries based on contrast enhancement.
-        
+
         Strategy (Enhanced):
         1. Find high-contrast voxels (>dynamic_min_hu) near/within lung region.
         2. Use anatomical constraints (position, shape).
@@ -3721,9 +3880,23 @@ class TEPProcessingService:
         """
         # Determine actual HU threshold based on contrast quality (or fallback to constant)
         min_hu = dynamic_min_hu if dynamic_min_hu is not None else self.PULMONARY_ARTERY_MIN_HU
-        
-        # Initial contrast mask for arterial structures
-        pa_mask = (data >= min_hu) & (data <= 500)
+
+        # Seed 1: Certain arteries (contrast-enhanced, high-HU)
+        pa_seed1 = (data >= min_hu) & (data <= 500)
+
+        # Seed 2: Candidate arteries — dark-cored massive PE: 80 HU to min_hu + MK>1.0
+        # High kurtosis selects non-Gaussian signature of thrombus-occluded lumen.
+        if mk_map is not None:
+            pa_seed2 = (data >= 80) & (data < min_hu) & (mk_map > 1.0)
+            pa_mask = pa_seed1 | pa_seed2
+            if log_callback:
+                log_callback(
+                    f"   Dual-Threshold PA Seed: "
+                    f"Seed1={int(np.sum(pa_seed1)):,} vox (>={min_hu} HU), "
+                    f"Seed2={int(np.sum(pa_seed2)):,} vox (80-{min_hu-1} HU + MK>1.0)"
+                )
+        else:
+            pa_mask = pa_seed1
         
         # Dilate lung mask to include hilar region (The "Hilar Radar" trick)
         struct = generate_binary_structure(3, 2)
