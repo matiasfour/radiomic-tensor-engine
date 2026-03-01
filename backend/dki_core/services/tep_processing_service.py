@@ -728,17 +728,22 @@ class TEPProcessingService:
         pseudocolor_map = self._generate_pseudocolor_lut(working_data, domain_mask=(lung_mask | pa_mask))
         
         # Expand masks to original isotropic size (crop → full isotropic volume)
-        pa_mask_full = self._expand_to_original(pa_mask, data.shape, crop_info)
-        pseudocolor_map_full = self._expand_to_original(pseudocolor_map, data.shape, crop_info)
-        thrombus_mask_full = self._expand_to_original(thrombus_mask, data.shape, crop_info)
-        lung_mask_full = self._expand_to_original(lung_mask, data.shape, crop_info)
-        heatmap_full = self._expand_to_original(heatmap, (*data.shape, 3), crop_info)
-        mk_map_full = self._expand_to_original(mk_map, data.shape, crop_info)
-        fac_map_full = self._expand_to_original(fac_map, data.shape, crop_info)
-        centerline_full = self._expand_to_original(centerline, data.shape, crop_info)
+        # IMPORTANT: Save isotropic data.shape BEFORE reverse isotropic changes it
+        data_iso_shape = data.shape
+        
+        pa_mask_full = self._expand_to_original(pa_mask, data_iso_shape, crop_info)
+        pseudocolor_map_full = self._expand_to_original(pseudocolor_map, data_iso_shape, crop_info)
+        thrombus_mask_full = self._expand_to_original(thrombus_mask, data_iso_shape, crop_info)
+        lung_mask_full = self._expand_to_original(lung_mask, data_iso_shape, crop_info)
+        heatmap_full = self._expand_to_original(heatmap, (*data_iso_shape, 3), crop_info)
+        mk_map_full = self._expand_to_original(mk_map, data_iso_shape, crop_info)
+        fac_map_full = self._expand_to_original(fac_map, data_iso_shape, crop_info)
+        centerline_full = self._expand_to_original(centerline, data_iso_shape, crop_info)
+        coherence_map_full = self._expand_to_original(coherence_map, data_iso_shape, crop_info)
+        working_exclusion_full = self._expand_to_original(working_exclusion, data_iso_shape, crop_info)
         
         # Expand ROI heatmap (always generated)
-        roi_heatmap_full = self._expand_to_original(roi_heatmap, (*data.shape, 3), crop_info)
+        roi_heatmap_full = self._expand_to_original(roi_heatmap, (*data_iso_shape, 3), crop_info)
         
         # ═══════════════════════════════════════════════════════════════════════════
         # REVERSE ISOTROPIC: Return all outputs to original voxel grid
@@ -757,6 +762,8 @@ class TEPProcessingService:
             # Float maps (order=1, linear interpolation)
             mk_map_full = self._reverse_isotropic(mk_map_full, iso_original_shape, order=1)
             fac_map_full = self._reverse_isotropic(fac_map_full, iso_original_shape, order=1)
+            coherence_map_full = self._reverse_isotropic(coherence_map_full, iso_original_shape, order=1)
+            working_exclusion_full = self._reverse_isotropic(working_exclusion_full, iso_original_shape, order=0) > 0.5
             pseudocolor_map_full = self._reverse_isotropic(pseudocolor_map_full, (*iso_original_shape, 3), order=0)
             
             # RGB heatmaps (order=0 to avoid color blending artifacts)
@@ -790,11 +797,11 @@ class TEPProcessingService:
             for x in np.unique(np.where(thrombus_mask_full)[0])
         ))
         
-        # Flow alerts — use expanded masks too
+        # Flow alerts — use pre-expanded, pre-reversed maps
         flow_alert_mask = (
-            (self._expand_to_original(coherence_map, data.shape, crop_info) < 0.4)
+            (coherence_map_full < 0.4)
             & (lung_mask_full | pa_mask_full)
-            & ~self._expand_to_original(working_exclusion, data.shape, crop_info)
+            & ~working_exclusion_full
         )
         z_flow = sorted(set(
             max(0, min(int(x), total_slices - 1))
@@ -885,8 +892,8 @@ class TEPProcessingService:
             'kurtosis_map': mk_map_full.astype(np.float32),
             'kurtosis_map': mk_map_full.astype(np.float32),
             'fac_map': fac_map_full.astype(np.float32),
-            'coherence_map': self._expand_to_original(coherence_map, data.shape, crop_info).astype(np.float32), # Phase 7
-            'exclusion_mask': exclusion_mask.astype(np.uint8),
+            'coherence_map': coherence_map_full.astype(np.float32), # Phase 7
+            'exclusion_mask': working_exclusion_full.astype(np.uint8) if isinstance(working_exclusion_full, np.ndarray) else exclusion_mask.astype(np.uint8),
             'vessel_centerline': centerline_full.astype(np.uint8),
             'total_clot_volume': float(total_clot_volume),
             'pulmonary_artery_volume': float(pa_volume),
