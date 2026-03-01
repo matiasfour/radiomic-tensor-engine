@@ -772,6 +772,42 @@ class TEPProcessingService:
             
             # Restore original data shape reference for downstream calculations
             data = self._reverse_isotropic(data, iso_original_shape, order=1)
+            
+            # ── FIX: Scale voi_findings coordinates from isotropic → original space ──
+            # Centroids are in cropped isotropic coords. We need to scale them by inverse_zoom
+            # so they align with the expanded original-space masks.
+            inverse_zoom = np.array(iso_original_shape[:3], dtype=np.float64) / np.array(data_iso_shape[:3], dtype=np.float64)
+            
+            if thrombus_info.get('voi_findings'):
+                for finding in thrombus_info['voi_findings']:
+                    # Scale centroid (X, Y, Z) from isotropic → original
+                    if 'centroid' in finding:
+                        old_c = finding['centroid']
+                        finding['centroid'] = (
+                            old_c[0] * inverse_zoom[0],
+                            old_c[1] * inverse_zoom[1],
+                            old_c[2] * inverse_zoom[2]
+                        )
+                    # Scale slice_range (z1, z2)
+                    if 'slice_range' in finding:
+                        z1, z2 = finding['slice_range']
+                        finding['slice_range'] = (
+                            int(z1 * inverse_zoom[2]),
+                            int(z2 * inverse_zoom[2])
+                        )
+            
+            # ── FIX: Scale crop_info bounds from isotropic → original space ──
+            # So that pin builder (line 841) correctly adds offsets in original coordinates
+            if crop_info and 'crop_bounds' in crop_info:
+                cb = crop_info['crop_bounds']
+                crop_info['crop_bounds'] = {
+                    'x_start': int(cb['x_start'] * inverse_zoom[0]),
+                    'y_start': int(cb['y_start'] * inverse_zoom[1]),
+                    'z_start': int(cb.get('z_start', 0) * inverse_zoom[2]),
+                }
+            
+            if log_callback:
+                log_callback(f"   📌 Pin coordinates scaled by inverse_zoom={np.round(inverse_zoom, 3)}")
         
         # Calculate total volumes (use original spacing for physical accuracy)
         voxel_volume_cm3_original = np.prod(spacing_original) / 1000.0
@@ -2754,7 +2790,15 @@ class TEPProcessingService:
                 cx, cy, cz = region.centroid
                 candidate_z = int(cz)
                 
-                if candidate_z < self.Z_GUARD_MIN_SLICE:
+                # Dynamically scale Z-Guard threshold for isotropic space
+                # Z_GUARD_MIN_SLICE is calibrated for original DICOM slices;
+                # if data is resampled, scale proportionally
+                effective_z_guard = self.Z_GUARD_MIN_SLICE
+                if spacing is not None and len(spacing) >= 3:
+                    # In isotropic 1mm space, Z dimension may be compressed → scale guard
+                    effective_z_guard = int(self.Z_GUARD_MIN_SLICE * (spacing[2] / 1.0)) if spacing[2] < 1.0 else self.Z_GUARD_MIN_SLICE
+                
+                if candidate_z < effective_z_guard:
                     # Count PA voxels in this specific Z-slice (Axis 2)
                     pa_voxels_in_slice = np.sum(pa_mask[:, :, candidate_z])
                     if pa_voxels_in_slice < self.Z_GUARD_MIN_PA_VOXELS:
