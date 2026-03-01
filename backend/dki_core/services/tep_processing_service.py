@@ -1336,7 +1336,34 @@ class TEPProcessingService:
         
         # Dice coefficient = 2 * |A ∩ B| / (|A| + |B|)
         dice = (2.0 * intersection_voxels) / (gt_voxels + mart_voxels) if (gt_voxels + mart_voxels) > 0 else 0.0
-        
+
+        # Z-FLIP RETRY: If Dice is near-zero, the GT mask may be Z-inverted relative
+        # to the DICOM volume. Try flipping axis=2 (Z) and re-evaluate.
+        if dice < 0.05 and gt_voxels > 0 and mart_voxels > 0:
+            gt_flipped = np.flip(gt_mask, axis=2)
+            flipped_intersection = int(np.sum(gt_flipped & mart_binary))
+            if flipped_intersection > intersection_voxels:
+                if log_callback:
+                    log_callback(
+                        f"  🔄 [Z-FLIP] Low Dice={dice:.3f} — GT Z-flip improves intersection "
+                        f"{intersection_voxels} → {flipped_intersection}. Adopting flip."
+                    )
+                gt_mask = gt_flipped
+                intersection_voxels = flipped_intersection
+                missed_voxels    = int(np.sum(gt_mask & ~mart_binary))
+                discovery_voxels = int(np.sum(~gt_mask & mart_binary))
+                intersection_cm3 = intersection_voxels * voxel_vol_cm3
+                missed_cm3       = missed_voxels * voxel_vol_cm3
+                discovery_cm3    = discovery_voxels * voxel_vol_cm3
+                sensitivity = intersection_voxels / gt_voxels if gt_voxels > 0 else 1.0
+                dice = (2.0 * intersection_voxels) / (gt_voxels + mart_voxels) if (gt_voxels + mart_voxels) > 0 else 0.0
+            else:
+                if log_callback:
+                    log_callback(
+                        f"  ℹ️ [Z-FLIP] Tried Z-flip, no improvement "
+                        f"({intersection_voxels} → {flipped_intersection}). Keeping original."
+                    )
+
         return {
             'gt_mask': gt_mask,
             'gt_volume_cm3': float(gt_volume_cm3),
@@ -1850,11 +1877,11 @@ class TEPProcessingService:
         
         # ═══════════════════════════════════════════════════════════════════════════
         # STERNUM GUARD: Asymmetric Anterior Erosion
-        # The anterior 35% of the Y-axis contains the sternum, internal mammary
+        # The anterior 20% of the Y-axis contains the sternum, internal mammary
         # vessels, and pericardial fat. Apply extra erosion only to this zone.
         # ═══════════════════════════════════════════════════════════════════════════
         y_dim = eroded_mask.shape[1]
-        anterior_zone_limit = int(y_dim * 0.35)
+        anterior_zone_limit = int(y_dim * 0.20)
         
         struct_aggressive = generate_binary_structure(3, 2)  # 18-connected for stronger erosion
         anterior_slice = eroded_mask[:, :anterior_zone_limit, :]
@@ -1867,7 +1894,7 @@ class TEPProcessingService:
         anterior_removed = anterior_before - np.sum(eroded_mask[:, :anterior_zone_limit, :])
         
         if log_callback:
-            log_callback(f"   [STERNUM GUARD] Anterior 35% extra erosion: {anterior_removed:,} voxels removed")
+            log_callback(f"   [STERNUM GUARD] Anterior 20% extra erosion: {anterior_removed:,} voxels removed")
         
         # Step 2: Create extra bone safety buffer
         bone_mask = data > self.BONE_EXCLUSION_HU
@@ -2799,6 +2826,19 @@ class TEPProcessingService:
                         f"   Large Mass Boost: {_large_mass_total:,} sub-threshold voxels "
                         f"boosted x1.3 (relaxed Gate M: geo>0.1, region>1000 vox)"
                     )
+                # FLAT +0.5 BONUS: any connected candidate >500 voxels gets unconditional
+                # score elevation — large solid masses inside PA_Mask are almost never noise.
+                _flat_bonus_total = 0
+                for _fb_i, _fb_sz in enumerate(_lm_sizes):
+                    if _fb_sz > 500:
+                        _fb_region = (_lm_labeled == (_fb_i + 1))
+                        score_map[_fb_region] += 0.5
+                        _flat_bonus_total += int(_fb_sz)
+                if _flat_bonus_total > 0 and log_callback:
+                    log_callback(
+                        f"   Flat +0.5 Bonus: {_flat_bonus_total:,} voxels in large candidates "
+                        f"(>500 vox) received unconditional score elevation"
+                    )
         except Exception as _lm_err:
             if log_callback:
                 log_callback(f"   Large Mass Boost failed (non-critical): {_lm_err}")
@@ -3188,6 +3228,38 @@ class TEPProcessingService:
                                     f"Avg_HU={_avg_hu:.1f}, Avg_FAC={_avg_fac:.3f}, "
                                     f"Avg_MK={_avg_mk:.3f}, Final_Score={_avg_score:.3f}"
                                 )
+                                # Save NIfTI crops for large missed regions (visual QC)
+                                _rv_size = int(np.sum(_rv))
+                                if _rv_size > 500:
+                                    try:
+                                        import nibabel as _nib
+                                        _coords = np.where(_rv)
+                                        # axis order in this codebase: (X, Y, Z)
+                                        _x0 = max(0, int(np.min(_coords[0])) - 5)
+                                        _x1 = min(data.shape[0], int(np.max(_coords[0])) + 6)
+                                        _y0 = max(0, int(np.min(_coords[1])) - 5)
+                                        _y1 = min(data.shape[1], int(np.max(_coords[1])) + 6)
+                                        _z0 = max(0, int(np.min(_coords[2])) - 5)
+                                        _z1 = min(data.shape[2], int(np.max(_coords[2])) + 6)
+                                        _crop_ct   = data[_x0:_x1, _y0:_y1, _z0:_z1].astype(np.float32)
+                                        _crop_mask = _rv[_x0:_x1, _y0:_y1, _z0:_z1].astype(np.uint8)
+                                        _out_dir   = _os.path.dirname(mat_filepath)
+                                        _nib.save(
+                                            _nib.Nifti1Image(_crop_ct, np.eye(4)),
+                                            _os.path.join(_out_dir, f"debug_missed_clot_{_z_center}_ct.nii.gz")
+                                        )
+                                        _nib.save(
+                                            _nib.Nifti1Image(_crop_mask, np.eye(4)),
+                                            _os.path.join(_out_dir, f"debug_missed_clot_{_z_center}_gt.nii.gz")
+                                        )
+                                        log_callback(
+                                            f"[GOD_MODE] Saved NIfTI crop: debug_missed_clot_{_z_center}_*.nii.gz "
+                                            f"({_rv_size} vox, box [{_x0}:{_x1},{_y0}:{_y1},{_z0}:{_z1}])"
+                                        )
+                                    except ImportError:
+                                        log_callback("[GOD_MODE] nibabel not installed — skipping NIfTI crop save.")
+                                    except Exception as _nii_err:
+                                        log_callback(f"[GOD_MODE] NIfTI crop save failed: {_nii_err}")
                         else:
                             log_callback("[GOD_MODE] MART detected ALL GT regions. Sensitivity=100%.")
                 except Exception as _gm_err:
