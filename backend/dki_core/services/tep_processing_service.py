@@ -3728,19 +3728,35 @@ class TEPProcessingService:
     @staticmethod
     def _vmtk_conda_args():
         """
-        Return the conda run prefix arguments for the VMTK environment.
+        Return the complete command prefix INCLUDING the python interpreter for
+        VMTK subprocess calls.  Callers append the script path and its arguments
+        directly — they must NOT add an extra 'python'.
 
-        On Lightning.ai the start_server.sh exports VMTK_ENV_DIR pointing to
-        the persistent conda prefix (/teamspace/.../vmtk_env).  Locally the
-        env is installed under the default name 'vmtk_env'.
-
-        Using --no-capture-output ensures subprocess stdout/stderr stream in
-        real-time rather than being buffered by conda.
+        Lightning.ai (VMTK_ENV_DIR=SYSTEM):
+            VMTK is installed in the active conda env → call sys.executable directly.
+        Local venv (VMTK_ENV_DIR=/path/to/venv):
+            Call the venv python binary directly.
+        Default (VMTK_ENV_DIR unset):
+            Use 'conda run -n vmtk_env python' for the local named conda env.
         """
+        import sys
         prefix = os.environ.get('VMTK_ENV_DIR', '')
+
+        # Lightning.ai: VMTK installed into the active/system conda env
+        if prefix == 'SYSTEM':
+            return [sys.executable]
+
+        # Custom prefix — could be a conda env or a Python venv
         if prefix and os.path.isdir(prefix):
-            return ['conda', 'run', '--no-capture-output', '--prefix', prefix]
-        return ['conda', 'run', '--no-capture-output', '-n', 'vmtk_env']
+            python_bin = os.path.join(prefix, 'bin', 'python')
+            if os.path.isfile(python_bin):
+                # Pure venv: call the python binary directly
+                return [python_bin]
+            # Conda env at a custom prefix (legacy local setup)
+            return ['conda', 'run', '--no-capture-output', '--prefix', prefix, 'python']
+
+        # Default: local dev with named conda env 'vmtk_env'
+        return ['conda', 'run', '--no-capture-output', '-n', 'vmtk_env', 'python']
 
     def _find_pa_seed(self, data, spacing, lung_mask=None):
         """
@@ -3830,7 +3846,7 @@ class TEPProcessingService:
                 spacing_str = f"{spacing[0]},{spacing[1]},{spacing[2]}"
 
                 cmd = TEPProcessingService._vmtk_conda_args() + [
-                    'python', worker_path,
+                    worker_path,
                     '--mode', 'segment',
                     '--input', ct_path,
                     '--spacing', spacing_str,
@@ -3898,7 +3914,7 @@ class TEPProcessingService:
             return TEPProcessingService._vmtk_ok
         try:
             cmd = TEPProcessingService._vmtk_conda_args() + [
-                'python', '-c', 'import vmtk; import vtk'
+                '-c', 'import vmtk; import vtk'
             ]
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             TEPProcessingService._vmtk_ok = (r.returncode == 0)
@@ -3941,7 +3957,7 @@ class TEPProcessingService:
 
                 # --- Invoke worker ---
                 cmd = TEPProcessingService._vmtk_conda_args() + [
-                    'python', worker_path,
+                    worker_path,
                     '--mode', 'mesh',
                     '--input', mask_path,
                     '--spacing', spacing_str,
