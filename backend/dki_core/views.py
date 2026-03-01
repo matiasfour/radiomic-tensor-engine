@@ -780,6 +780,77 @@ class StudyViewSet(viewsets.ModelViewSet):
 
         # Save Source Volume for 3D Viewer (Niivue)
         result.source_volume.name = save_nifti(data, 'source', affine) # Use original 'data' volume
+
+        # ── VMTK Mesh Outputs (PA surface + thrombus 3D models) ──
+        def save_mesh_file(src_path, mesh_subdir, filename):
+            """Copy a mesh file produced by vmtk_worker into the media directory."""
+            import shutil
+            full_dir = os.path.join(settings.MEDIA_ROOT, 'results', 'meshes', mesh_subdir)
+            os.makedirs(full_dir, exist_ok=True)
+            dst = os.path.join(full_dir, filename)
+            shutil.copy2(src_path, dst)
+            return os.path.join('results', 'meshes', mesh_subdir, filename)
+
+        def generate_thrombus_obj(thrombus_arr, spacing_mm, study_uuid):
+            """
+            Generate an OBJ mesh from the thrombus binary mask using
+            skimage Marching Cubes. Returns the saved file path relative to MEDIA_ROOT,
+            or None if the mask is empty.
+            """
+            from skimage.measure import marching_cubes
+            if not thrombus_arr.any():
+                return None
+            try:
+                verts, faces, _, _ = marching_cubes(
+                    thrombus_arr.astype(np.float32),
+                    level=0.5,
+                    spacing=spacing_mm,
+                )
+                mesh_dir = os.path.join(settings.MEDIA_ROOT, 'results', 'meshes', 'thrombus')
+                os.makedirs(mesh_dir, exist_ok=True)
+                obj_name = f"thrombus_{study_uuid}.obj"
+                obj_path = os.path.join(mesh_dir, obj_name)
+                with open(obj_path, 'w') as fobj:
+                    for v in verts:
+                        fobj.write(f"v {v[0]:.4f} {v[1]:.4f} {v[2]:.4f}\n")
+                    for f_ in faces:
+                        fobj.write(f"f {f_[0]+1} {f_[1]+1} {f_[2]+1}\n")
+                return os.path.join('results', 'meshes', 'thrombus', obj_name)
+            except Exception as _e:
+                log(f"Warning: thrombus OBJ generation failed: {_e}", 'WARNING', stage='OUTPUT')
+                return None
+
+        if results.get('vmtk_surface_obj') and os.path.exists(results['vmtk_surface_obj']):
+            try:
+                pa_mesh_rel = save_mesh_file(
+                    results['vmtk_surface_obj'],
+                    'pa', f"pa_surface_{study.id}.obj"
+                )
+                result.pa_mesh.name = pa_mesh_rel
+                log(f"VMTK PA surface mesh saved: {pa_mesh_rel}", stage='OUTPUT')
+            except Exception as _e:
+                log(f"Warning: could not save PA mesh: {_e}", 'WARNING', stage='OUTPUT')
+
+        if results.get('vmtk_centerlines_vtp') and os.path.exists(results['vmtk_centerlines_vtp']):
+            try:
+                cl_rel = save_mesh_file(
+                    results['vmtk_centerlines_vtp'],
+                    'centerline', f"centerlines_{study.id}.vtp"
+                )
+                result.centerline_vtp.name = cl_rel
+                log(f"VMTK centerlines saved: {cl_rel}", stage='OUTPUT')
+            except Exception as _e:
+                log(f"Warning: could not save centerline VTP: {_e}", 'WARNING', stage='OUTPUT')
+
+        # Generate thrombus OBJ mesh from thrombus_mask (uses skimage, no VMTK required)
+        spacing_mm = tuple(metadata.get('spacing', (1.0, 1.0, 1.0)))
+        thrombus_obj_rel = generate_thrombus_obj(
+            results.get('thrombus_mask', np.zeros((1, 1, 1), dtype=np.uint8)),
+            spacing_mm, study.id
+        )
+        if thrombus_obj_rel:
+            result.thrombus_mesh.name = thrombus_obj_rel
+            log(f"Thrombus 3D mesh saved: {thrombus_obj_rel}", stage='OUTPUT')
         
         # Save ROI heatmap (always generated - shows domain boundaries for viewer toggle)
         result.tep_roi_heatmap.name = save_nifti(results['tep_roi_heatmap'], 'roi_heatmap', affine)

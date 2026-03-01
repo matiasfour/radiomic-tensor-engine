@@ -286,6 +286,11 @@ export interface ProcessingResult {
 		sensitivity: number;
 		dice: number;
 	};
+
+	// VMTK 3D Mesh outputs (OBJ/VTP meshes for interactive 3D viewer)
+	pa_mesh?: string | null;        // Smooth PA surface mesh (.obj) — blue semi-transparent in 3D
+	thrombus_mesh?: string | null;  // Thrombus mesh (.obj) — solid red overlay in 3D
+	centerline_vtp?: string | null; // Centerlines with radius attribute (.vtp) — for analysis
 }
 
 export interface SlicesMeta {

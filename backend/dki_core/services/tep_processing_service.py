@@ -1,5 +1,9 @@
 import numpy as np
 import logging
+import os
+import subprocess
+import json
+import tempfile
 from scipy.ndimage import label, binary_erosion, binary_dilation, uniform_filter, sobel
 from scipy.ndimage import generate_binary_structure, binary_fill_holes, center_of_mass, binary_closing, iterate_structure
 from scipy.ndimage import gaussian_filter, distance_transform_edt
@@ -484,20 +488,64 @@ class TEPProcessingService:
              pa_info = {'method': 'LUNG_MASK_FALLBACK (NC_MODE)'}
         else:
              if log_callback:
-                 log_callback("Step 4/9: Segmenting pulmonary arteries...")
+                 log_callback(
+                     "Step 4/9: Segmenting pulmonary arteries "
+                     "(VMTK Level Set [primary] → HU dual-seed [fallback])..."
+                 )
 
-             # Phase 2 Adaptive Thresholding: If contrast is poor, we must lower the 150 HU bar.
-             # We use 45% of the measured mean arterial HU, but never go below 80 HU (muscle/blood baseline).
-             base_hu = getattr(self, 'mean_arterial_hu', 300)
-             dynamic_min_hu = max(80, int(base_hu * 0.45))
+             vmtk_seg_success = False
 
-             pa_mask, pa_info = self._segment_pulmonary_arteries(
-                 working_data,
-                 lung_mask,
-                 dynamic_min_hu=dynamic_min_hu,
-                 log_callback=log_callback,
-                 mk_map=mk_map              # Dual-seed: dark-core massive PE recovery
-             )
+             # ── PRIMARY: VMTK Level Set ─────────────────────────────────────────
+             # Gradient/edge-based deformable model: stopping function = vessel WALL.
+             # Grows through bright blood AND dark thrombus (60-80 HU) without clipping.
+             if self._vmtk_available():
+                 if log_callback:
+                     log_callback("   [VMTK] Searching for PA seed (HU>200, central ROI)...")
+                 seed = self._find_pa_seed(working_data, spacing, lung_mask)
+                 if seed is not None:
+                     pa_mask_vmtk = self._run_vmtk_segmentation(
+                         working_data, seed, spacing, log_callback=log_callback
+                     )
+                     if pa_mask_vmtk is not None and pa_mask_vmtk.sum() > 1000:
+                         pa_mask = pa_mask_vmtk
+                         pa_info = {
+                             'method': 'VMTK_LEVELSET',
+                             'seed_voxel': seed,
+                             'total_voxels': int(pa_mask.sum()),
+                         }
+                         vmtk_seg_success = True
+                         if log_callback:
+                             log_callback(
+                                 f"   ✅ [VMTK] Level-set PA mask accepted: "
+                                 f"{pa_mask.sum():,} vx — dark thrombus core included"
+                             )
+                     else:
+                         if log_callback:
+                             log_callback(
+                                 "   ⚠️ [VMTK] Level-set output empty or too small → HU fallback"
+                             )
+                 else:
+                     if log_callback:
+                         log_callback(
+                             "   ⚠️ [VMTK] No bright-blood seed found in central ROI → HU fallback"
+                         )
+
+             # ── FALLBACK: HU dual-seed ──────────────────────────────────────────
+             # Classic method: HU ≥ dynamic_min_hu (primary) + HU≥80 + MK>1.0 (dark recovery).
+             if not vmtk_seg_success:
+                 if log_callback:
+                     log_callback("   ↩️  [HU] Running HU-based dual-seed segmentation...")
+                 # Adaptive threshold: 45% of mean arterial HU, floor at 80 HU.
+                 base_hu = getattr(self, 'mean_arterial_hu', 300)
+                 dynamic_min_hu = max(80, int(base_hu * 0.45))
+
+                 pa_mask, pa_info = self._segment_pulmonary_arteries(
+                     working_data,
+                     lung_mask,
+                     dynamic_min_hu=dynamic_min_hu,
+                     log_callback=log_callback,
+                     mk_map=mk_map      # Dual-seed: dark-core massive PE recovery
+                 )
         
         self._log_tensor_stats("02_PA_Mask", pa_mask, log_callback)
          
@@ -510,7 +558,29 @@ class TEPProcessingService:
         centerline, centerline_info = self._extract_vessel_centerline(
             pa_mask, working_data, spacing=spacing, log_callback=log_callback
         )
-        
+
+        # ═══════════════════════════════════════════════════════════════════════════
+        # STEP 4.6: VMTK Geometric Analysis — Surface Mesh + True Centerline Radius
+        # Generates smooth 3D surface mesh for visualization and radius_map for
+        # detection gating. Runs in isolated conda env (vmtk_env) via subprocess.
+        # ═══════════════════════════════════════════════════════════════════════════
+        if log_callback:
+            log_callback("Step 4.6/9: VMTK geometric analysis (surface mesh + radius map)...")
+
+        vmtk_result = self._run_vmtk_pipeline(pa_mask, spacing, log_callback=log_callback)
+        vmtk_radius_map = None
+        if vmtk_result and vmtk_result.get('ok'):
+            vmtk_radius_map = vmtk_result.get('radius_map')
+            if log_callback:
+                n_pts = vmtk_result.get('n_centerline_points', 0)
+                n_cells = vmtk_result.get('n_surface_cells', 0)
+                log_callback(f"   ✅ [VMTK] Surface: {n_cells:,} cells | Centerline: {n_pts:,} pts")
+        else:
+            if log_callback:
+                log_callback("   ⚠️ [VMTK] Not available or failed — using skeletonize distance map as radius fallback")
+            # Fallback: use the existing distance_transform_edt from _extract_vessel_centerline
+            vmtk_radius_map = centerline_info.get('distance_map')
+
         # STEP 5: MK map pre-computed at Step 4.PRE above — no-op here.
         # mk_map already available from pre-PA dual-seed computation.
 
@@ -592,7 +662,9 @@ class TEPProcessingService:
             z_guard_slices=True,  # Enable Z-anatomical guard
             spacing=spacing,      # Pass voxel spacing for VOI analysis
             flow_alignment_map=flow_alignment_map,  # Phase 2: Tractography disruption sensor
-            mat_filepath=mat_filepath               # GOD_MODE: thread GT path for real-time diagnostics
+            mat_filepath=mat_filepath,              # GOD_MODE: thread GT path for real-time diagnostics
+            vmtk_radius_map=vmtk_radius_map,        # VMTK: geometric vessel radius per voxel
+            vmtk_result=vmtk_result                 # VMTK: full result dict (truncated branches etc.)
         )
 
         # ═══════════════════════════════════════════════════════════════════════════
@@ -1026,6 +1098,11 @@ class TEPProcessingService:
             'slices_meta': slices_meta,
             'findings_pins': findings_pins,
             'lobe_sensitivity': lobe_sensitivity,
+
+            # VMTK geometric outputs (file paths for mesh serving)
+            'vmtk_surface_obj': vmtk_result.get('surface_obj') if vmtk_result and vmtk_result.get('ok') else None,
+            'vmtk_centerlines_vtp': vmtk_result.get('centerlines_vtp') if vmtk_result and vmtk_result.get('ok') else None,
+            'vmtk_truncated_branches': vmtk_result.get('truncated_branches', []) if vmtk_result else [],
         }
         
         if log_callback:
@@ -1360,6 +1437,24 @@ class TEPProcessingService:
                 intersection_voxels = new_intersection
                 if log_callback:
                     log_callback("  🔄 Auto-transposed GT mask (X/Y swap) for correct anatomical alignment.")
+        # SEARCH SPACE OVERLAP AUDIT
+        # Checks what fraction of GT marks fall inside the segmented PA search space.
+        # If < 5%, the .mat mask is completely misaligned — ignore sensitivity score.
+        if pa_mask is not None and gt_voxels > 0 and log_callback:
+            _pa_binary = (np.asarray(pa_mask) > 0).astype(np.uint8)
+            if _pa_binary.shape == gt_mask.shape:
+                _gt_in_pa = int(np.sum(gt_mask & _pa_binary))
+                _overlap_pct = 100.0 * _gt_in_pa / gt_voxels
+                log_callback(
+                    f"  [AUDIT] GT vs SearchSpace: {_overlap_pct:.1f}% of Expert marks "
+                    f"({_gt_in_pa:,}/{gt_voxels:,} vox) are inside the segmented Arteries."
+                )
+                if _overlap_pct < 5.0:
+                    log_callback(
+                        "  ⛔ [AUDIT] CRITICAL: <5% overlap — GT mask is spatially misaligned. "
+                        "Sensitivity metric is not reliable. Manual origin correction required."
+                    )
+
         missed_voxels = int(np.sum(gt_mask & ~mart_binary))  # FN: in GT but not in MART
         discovery_voxels = int(np.sum(~gt_mask & mart_binary))  # FP: in MART but not in GT
         
@@ -1413,8 +1508,8 @@ class TEPProcessingService:
         try:
             import nibabel as _nib_gt
             import os as _os_gt
-            _gt_out_path = _os_gt.join(
-                _os_gt.dirname(mat_filepath),
+            _gt_out_path = _os_gt.path.join(
+                _os_gt.path.dirname(mat_filepath),
                 "gt_debug_overlay.nii.gz"
             )
             _nib_gt.save(
@@ -1429,6 +1524,34 @@ class TEPProcessingService:
         except Exception as _gt_exp_err:
             if log_callback:
                 log_callback(f"  ⚠️ [GT OVERLAY] Export failed: {_gt_exp_err}")
+
+        # COMPARISON DIFF MASK: 3-value mask for spatial gap visualization
+        # Value 1 = MART only | Value 2 = GT only | Value 3 = Both agreed
+        try:
+            import nibabel as _nib_diff
+            import os as _os_diff
+            _diff_mask = np.zeros(gt_mask.shape, dtype=np.uint8)
+            _diff_mask[mart_binary.astype(bool) & ~gt_mask.astype(bool)] = 1  # MART only
+            _diff_mask[~mart_binary.astype(bool) & gt_mask.astype(bool)]  = 2  # GT only
+            _diff_mask[mart_binary.astype(bool) & gt_mask.astype(bool)]   = 3  # Intersection
+            _diff_path = _os_diff.path.join(
+                _os_diff.path.dirname(mat_filepath),
+                "comparison_diff.nii.gz"
+            )
+            _nib_diff.save(
+                _nib_diff.Nifti1Image(_diff_mask.astype(np.float32), np.eye(4)),
+                _diff_path
+            )
+            if log_callback:
+                log_callback(
+                    f"  💾 [DIFF MASK] Saved comparison_diff.nii.gz — "
+                    f"1=MART_only, 2=GT_only, 3=Intersection"
+                )
+        except ImportError:
+            pass  # nibabel not installed, silently skip
+        except Exception as _diff_err:
+            if log_callback:
+                log_callback(f"  ⚠️ [DIFF MASK] Export failed: {_diff_err}")
 
         return {
             'gt_mask': gt_mask,
@@ -2642,10 +2765,10 @@ class TEPProcessingService:
         # Df = -slope
         return -coeffs[0]
 
-    def _detect_filling_defects_enhanced(self, data, pa_mask, mk_map, fac_map, coherence_map, exclusion_mask, 
-                                     lung_mask, log_callback, apply_contrast_inhibitor, is_non_contrast, centerline, 
+    def _detect_filling_defects_enhanced(self, data, pa_mask, mk_map, fac_map, coherence_map, exclusion_mask,
+                                     lung_mask, log_callback, apply_contrast_inhibitor, is_non_contrast, centerline,
                                      centerline_info, z_guard_slices, spacing, flow_alignment_map=None,
-                                     mat_filepath=None):
+                                     mat_filepath=None, vmtk_radius_map=None, vmtk_result=None):
         
         import traceback as tb
         
@@ -2742,7 +2865,23 @@ class TEPProcessingService:
         # Expanded range: 15 HU (chronic/dark thrombi) to 120 HU (mixed with contrast)
         # Noise from 15-30 HU is controlled by topological PA-connectivity check downstream
         defect_mask = (data >= 15) & (data <= 120) & pa_dilated & lung_proximity
-        
+
+        # ── GATE R+ (VMTK Vessel Interior Strict) ──────────────────────────────
+        # Restrict search to voxels within the geometric vessel lumen.
+        # Uses VMTK MaximumInscribedSphereRadius per voxel; falls back to
+        # skeletonize distance map if VMTK was unavailable.
+        if vmtk_radius_map is not None and np.any(vmtk_radius_map > 0):
+            dist_from_cl = centerline_info.get('distance_map')
+            if dist_from_cl is not None and dist_from_cl.shape == data.shape:
+                # Allow 1.2× radius + 1.5 mm tolerance to handle partial-volume boundary voxels
+                inside_vessel = dist_from_cl <= (vmtk_radius_map * 1.2 + 1.5)
+                before_r = int(defect_mask.sum())
+                defect_mask = defect_mask & inside_vessel
+                after_r = int(defect_mask.sum())
+                if log_callback:
+                    log_callback(f"   🔬 [VMTK Gate R+] Vessel interior filter: {before_r:,} → {after_r:,} voxels "
+                                 f"(removed {before_r - after_r:,} extra-vascular candidates)")
+
         if log_callback:
             self._log_tensor_stats("03_Defect_Base_Mask", defect_mask, log_callback)
         
@@ -2825,7 +2964,19 @@ class TEPProcessingService:
         # Gate 2: Puerta de la Rugosidad (Validación Clínica RICCI + HU)
         rugosity_gate = (data_crop >= 40) & (data_crop <= 80) & (np.abs(ricci_crop) > 1.0)
         base_scores[rugosity_gate] += 1.0
-        
+
+        # Gate V: Vessel Interior Boost — thrombus HU range inside major artery = definite candidate
+        # Any mass in 50-80 HU sitting inside the PA search space is almost certainly a filling defect.
+        _pa_defect_crop = pa_mask[defect_mask] if pa_mask is not None else np.ones(np.sum(defect_mask), dtype=bool)
+        vessel_interior_gate = (data_crop >= 50) & (data_crop <= 80) & (_pa_defect_crop > 0)
+        if np.any(vessel_interior_gate):
+            base_scores[vessel_interior_gate] += 1.0
+            if log_callback:
+                log_callback(
+                    f"   Gate V (Vessel Interior): {int(np.sum(vessel_interior_gate)):,} voxels "
+                    f"boosted +1.0 (50-80 HU inside PA)"
+                )
+
         # Visual Noise Filter (Extreme Hodge or Ricci)
         noise_mask = (hodge_crop > 300) | (np.abs(ricci_crop) > 5.0)
         voxels_blocked = int(np.sum(noise_mask))
@@ -3567,6 +3718,303 @@ class TEPProcessingService:
         
         return validated_mask, stats
     
+    # ═══════════════════════════════════════════════════════════════════════════
+    # VMTK: Geometric Surface Mesh + True Centerline Radius
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    _vmtk_checked = False
+    _vmtk_ok = None  # cached availability flag
+
+    @staticmethod
+    def _vmtk_conda_args():
+        """
+        Return the conda run prefix arguments for the VMTK environment.
+
+        On Lightning.ai the start_server.sh exports VMTK_ENV_DIR pointing to
+        the persistent conda prefix (/teamspace/.../vmtk_env).  Locally the
+        env is installed under the default name 'vmtk_env'.
+
+        Using --no-capture-output ensures subprocess stdout/stderr stream in
+        real-time rather than being buffered by conda.
+        """
+        prefix = os.environ.get('VMTK_ENV_DIR', '')
+        if prefix and os.path.isdir(prefix):
+            return ['conda', 'run', '--no-capture-output', '--prefix', prefix]
+        return ['conda', 'run', '--no-capture-output', '-n', 'vmtk_env']
+
+    def _find_pa_seed(self, data, spacing, lung_mask=None):
+        """
+        Auto-detect a reliable seed voxel inside the main pulmonary artery trunk.
+
+        Strategy: find the largest bright-blood connected component (HU > 200)
+        inside the central 40 % bounding box of the volume.  This avoids
+        peripheral arteries, the aorta margin, and sub-diaphragmatic vessels.
+
+        Args:
+            data:       3-D numpy array (z, y, x) in HU
+            spacing:    [sz, sy, sx] in mm (not used here, kept for API symmetry)
+            lung_mask:  optional boolean mask to restrict search to lung ROI
+
+        Returns:
+            (z_vox, y_vox, x_vox) in full-volume coordinates, or None if no
+            HU > 200 region is found in the central bounding box.
+        """
+        nz, ny, nx = data.shape
+        # Central 40 % box — avoids peripheral arteries and bony structures
+        z0, z1 = int(nz * 0.30), int(nz * 0.70)
+        y0, y1 = int(ny * 0.20), int(ny * 0.80)
+        x0, x1 = int(nx * 0.20), int(nx * 0.80)
+
+        roi = data[z0:z1, y0:y1, x0:x1] > 200
+        if lung_mask is not None:
+            roi = roi & lung_mask[z0:z1, y0:y1, x0:x1]
+
+        labeled, n = label(roi)
+        if n == 0:
+            logger.info("[VMTK] _find_pa_seed: no HU>200 region in central ROI")
+            return None
+
+        sizes = np.bincount(labeled.ravel())
+        sizes[0] = 0
+        best = int(np.argmax(sizes))
+        com = center_of_mass(labeled == best)   # (z_local, y_local, x_local)
+        seed = (int(com[0]) + z0, int(com[1]) + y0, int(com[2]) + x0)
+        logger.info(
+            f"[VMTK] PA seed found at voxel {seed}  "
+            f"HU={data[seed]:.0f}  component_size={int(sizes[best])}"
+        )
+        return seed
+
+    def _run_vmtk_segmentation(self, volume_data, seed_coords, spacing, log_callback=None):
+        """
+        Call vmtk_worker.py --mode segment to perform level-set PA segmentation.
+
+        The worker runs inside the isolated vmtk_env conda environment.  It uses
+        VMTK's vmtkLevelSetSegmentation whose stopping function is the VESSEL WALL
+        gradient — NOT internal HU brightness — so the resulting pa_mask includes
+        dark thrombus regions (60-80 HU) that are missed by pure HU thresholding.
+
+        Args:
+            volume_data:  3-D float32 numpy array (z, y, x) in HU
+            seed_coords:  (z_vox, y_vox, x_vox) — center of main PA trunk
+            spacing:      [sz, sy, sx] in mm
+            log_callback: optional function(str) for real-time log forwarding
+
+        Returns:
+            Boolean numpy ndarray with the same shape as volume_data,
+            or None on any failure.
+        """
+        if not self._vmtk_available():
+            return None
+
+        try:
+            import nibabel as nib
+
+            worker_path = os.path.join(os.path.dirname(__file__), 'vmtk_worker.py')
+
+            with tempfile.TemporaryDirectory(prefix='vmtk_seg_') as tmp_dir:
+                # Save CT volume as float32 NIfTI
+                ct_path = os.path.join(tmp_dir, 'ct_volume.nii.gz')
+                affine = np.diag([spacing[0], spacing[1], spacing[2], 1.0])
+                nib.save(
+                    nib.Nifti1Image(volume_data.astype(np.float32), affine),
+                    ct_path,
+                )
+
+                out_dir = os.path.join(tmp_dir, 'seg_out')
+                os.makedirs(out_dir, exist_ok=True)
+
+                # Seed: worker expects "x_vox,y_vox,z_vox"
+                sz, sy, sx = seed_coords
+                seed_str = f"{sx},{sy},{sz}"
+                spacing_str = f"{spacing[0]},{spacing[1]},{spacing[2]}"
+
+                cmd = TEPProcessingService._vmtk_conda_args() + [
+                    'python', worker_path,
+                    '--mode', 'segment',
+                    '--input', ct_path,
+                    '--spacing', spacing_str,
+                    '--seed', seed_str,
+                    '--output-dir', out_dir,
+                ]
+
+                if log_callback:
+                    log_callback(
+                        f"   ⚙️ [VMTK-SEG] Launching level-set subprocess "
+                        f"(seed voxel={seed_coords})..."
+                    )
+
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+                for line in proc.stdout.splitlines():
+                    if log_callback and line.strip():
+                        log_callback(f"   {line}")
+
+                if proc.returncode != 0:
+                    if log_callback:
+                        log_callback(
+                            f"   ❌ [VMTK-SEG] Worker exited rc={proc.returncode}: "
+                            f"{proc.stderr[:300]}"
+                        )
+                    return None
+
+                meta_path = os.path.join(out_dir, 'metadata.json')
+                if not os.path.exists(meta_path):
+                    return None
+                with open(meta_path) as f:
+                    meta = json.load(f)
+                if not meta.get('ok'):
+                    if log_callback:
+                        log_callback(
+                            f"   ❌ [VMTK-SEG] Segmentation failed: {meta.get('error')}"
+                        )
+                    return None
+
+                mask_path = os.path.join(out_dir, 'pa_mask.nii.gz')
+                if not os.path.exists(mask_path):
+                    return None
+                pa_mask = (nib.load(mask_path).get_fdata() > 0.5)
+
+                if log_callback:
+                    log_callback(
+                        f"   ✅ [VMTK-SEG] Level-set PA mask: {pa_mask.sum():,} voxels "
+                        f"(dark thrombus core included)"
+                    )
+                return pa_mask
+
+        except subprocess.TimeoutExpired:
+            if log_callback:
+                log_callback("   ❌ [VMTK-SEG] Subprocess timed out after 300 s")
+            return None
+        except Exception as e:
+            logger.warning(f"[VMTK] _run_vmtk_segmentation exception: {e}")
+            if log_callback:
+                log_callback(f"   ❌ [VMTK-SEG] Exception: {e}")
+            return None
+
+    def _vmtk_available(self):
+        """Check once whether the vmtk_env conda environment is usable."""
+        if TEPProcessingService._vmtk_checked:
+            return TEPProcessingService._vmtk_ok
+        try:
+            cmd = TEPProcessingService._vmtk_conda_args() + [
+                'python', '-c', 'import vmtk; import vtk'
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            TEPProcessingService._vmtk_ok = (r.returncode == 0)
+        except Exception:
+            TEPProcessingService._vmtk_ok = False
+        TEPProcessingService._vmtk_checked = True
+        return TEPProcessingService._vmtk_ok
+
+    def _run_vmtk_pipeline(self, pa_mask, spacing, log_callback=None):
+        """
+        Run the VMTK worker script in the isolated vmtk_env conda environment.
+
+        Saves pa_mask as a temporary NIfTI, invokes vmtk_worker.py via
+        `conda run -n vmtk_env`, then loads the outputs (OBJ surface path,
+        centerlines VTP path, and radius_map numpy array).
+
+        Returns dict with keys: ok, surface_obj, centerlines_vtp, radius_map,
+        n_centerline_points, n_surface_cells, truncated_branches, error.
+        Returns None if VMTK is not available.
+        """
+        if not self._vmtk_available():
+            return None
+
+        try:
+            import nibabel as nib
+
+            worker_path = os.path.join(
+                os.path.dirname(__file__), 'vmtk_worker.py'
+            )
+
+            with tempfile.TemporaryDirectory(prefix='vmtk_') as tmp_dir:
+                # --- Save pa_mask as NIfTI ---
+                mask_path = os.path.join(tmp_dir, 'pa_mask.nii.gz')
+                affine = np.diag([spacing[0], spacing[1], spacing[2], 1.0])
+                nib.save(nib.Nifti1Image(pa_mask.astype(np.uint8), affine), mask_path)
+
+                spacing_str = f"{spacing[0]},{spacing[1]},{spacing[2]}"
+                out_dir = os.path.join(tmp_dir, 'vmtk_out')
+                os.makedirs(out_dir, exist_ok=True)
+
+                # --- Invoke worker ---
+                cmd = TEPProcessingService._vmtk_conda_args() + [
+                    'python', worker_path,
+                    '--mode', 'mesh',
+                    '--input', mask_path,
+                    '--spacing', spacing_str,
+                    '--output-dir', out_dir,
+                ]
+                if log_callback:
+                    log_callback("   ⚙️ [VMTK] Launching vmtk_worker subprocess...")
+
+                proc = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=300
+                )
+
+                # Relay worker stdout to pipeline log
+                for line in proc.stdout.splitlines():
+                    if log_callback and line.strip():
+                        log_callback(f"   {line}")
+
+                if proc.returncode != 0:
+                    if log_callback:
+                        log_callback(f"   ❌ [VMTK] Worker exited with code {proc.returncode}: {proc.stderr[:400]}")
+                    return {'ok': False, 'error': proc.stderr[:400]}
+
+                # --- Read metadata ---
+                meta_path = os.path.join(out_dir, 'metadata.json')
+                if not os.path.exists(meta_path):
+                    return {'ok': False, 'error': 'metadata.json not found'}
+                with open(meta_path) as f:
+                    meta = json.load(f)
+
+                if not meta.get('ok'):
+                    return {'ok': False, 'error': meta.get('error', 'unknown')}
+
+                # --- Load radius map ---
+                npz_path = os.path.join(out_dir, 'radius_data.npz')
+                radius_map = None
+                if os.path.exists(npz_path):
+                    npz = np.load(npz_path)
+                    radius_map = npz['radius_map']  # shape matches pa_mask
+
+                # --- Copy permanent outputs to a sibling dir of the temp dir ---
+                # (temp dir will be cleaned up; we copy files we need to keep)
+                perm_dir = tempfile.mkdtemp(prefix='vmtk_perm_')
+                result = {
+                    'ok': True,
+                    'radius_map': radius_map,
+                    'n_centerline_points': meta.get('n_centerline_points', 0),
+                    'n_surface_cells': meta.get('n_surface_cells', 0),
+                    'truncated_branches': meta.get('truncated_branches', []),
+                    'surface_obj': None,
+                    'centerlines_vtp': None,
+                    '_perm_dir': perm_dir,
+                }
+
+                for key, filename in [('surface_obj', 'pa_surface.obj'),
+                                      ('centerlines_vtp', 'centerlines.vtp')]:
+                    src = os.path.join(out_dir, filename)
+                    if os.path.exists(src):
+                        import shutil
+                        dst = os.path.join(perm_dir, filename)
+                        shutil.copy2(src, dst)
+                        result[key] = dst
+
+                return result
+
+        except subprocess.TimeoutExpired:
+            if log_callback:
+                log_callback("   ❌ [VMTK] Subprocess timed out after 300s")
+            return {'ok': False, 'error': 'timeout'}
+        except Exception as e:
+            if log_callback:
+                log_callback(f"   ❌ [VMTK] Exception in _run_vmtk_pipeline: {e}")
+            return {'ok': False, 'error': str(e)}
+
     # ═══════════════════════════════════════════════════════════════════════════
     # NEW: Vessel Centerline Extraction using Skeletonize
     # ═══════════════════════════════════════════════════════════════════════════

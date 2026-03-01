@@ -48,6 +48,60 @@ Los ganglios linfáticos hiliares o la grasa del corazón tienen la misma densid
 
 ---
 
+## ETAPA 1.5: Topología Vascular (VMTK — Mapa de Carreteras)
+
+Antes de buscar los "accidentes" (trombos), MART genera un **mapa geométrico perfecto de las arterias** usando el Vascular Modeling Toolkit. Transforma la máscara binaria voxelizada en una representación matemática continua del árbol arterial.
+
+### 1. Superficie Suavizada (Marching Cubes + Laplaciano)
+
+La máscara de PA (`pa_mask`) es una imagen de vóxeles discretos con escalones. VMTK extrae una isosuperficie con algoritmo **Marching Cubes** (nivel=0.5) y aplica **suavizado Laplaciano Windowed-Sinc** (30 iteraciones) para obtener una geometría médicamente precisa, sin el aspecto pixelado del TAC.
+
+* **Entrada:** `pa_mask` binaria + spacing
+* **Salida:** `pa_surface.obj` — malla suave del árbol arterial completo
+
+### 2. Extracción de Centerlines con Radio (vmtkNetworkExtraction)
+
+El corazón del sistema VMTK. Calcula matemáticamente la **línea central** de cada rama arterial, y en cada punto determina el **MaximumInscribedSphereRadius** — el radio de la esfera más grande que cabe dentro del vaso en ese punto.
+
+* Este radio NO es una estimación visual; es la solución exacta de la ecuación de Voronoi 3D aplicada a la superficie vascular.
+* **Salida:** `centerlines.vtp` — árbol de centerlines con radio por punto
+
+### 3. Radio Map por Vóxel (Interpolación a Espacio Discreto)
+
+Los radios de los puntos de la centerline se interpolan al espacio de vóxeles completo mediante transformada de distancia. Cada vóxel del volumen sabe a qué distancia está de la centerline más cercana y cuál es el radio del vaso en ese punto.
+
+* **Salida:** `radius_map` (3D float32) — radio local en mm por vóxel
+
+### 4. Gate R+ — Restricción Geométrica del Detector (La Innovación Clave)
+
+Con el `radius_map`, el algoritmo de detección aplica una nueva condición:
+
+```
+inside_vessel = distance_from_centerline ≤ (radius_map × 1.2) + 1.5mm
+defect_mask = defect_mask AND inside_vessel
+```
+
+* **Impacto clínico:** Todo candidato a trombo fuera del lumen vascular real se descarta instantáneamente — ganglios hiliares, grasa pericárdica, condensaciones parenquimatosas. Adiós a los **falsos positivos extra-vasculares**.
+* El factor ×1.2 + 1.5mm de tolerancia cubre vóxeles de volumen parcial en el borde vascular.
+
+### 5. Detección de Oclusiones Silenciosas (Ramas Truncadas)
+
+Si VMTK detecta que una centerline se **termina abruptamente** pero la `pa_mask` continúa más allá de ese punto, el sistema marca esa rama como potencial **oclusión total** (trombo tan grande que bloquea todo el contraste). Estos hallazgos se incluyen en `vmtk_truncated_branches`.
+
+### 6. Arquitectura Subprocess (Compatibilidad Python 3.13)
+
+VMTK requiere Python 3.9 y está instalado en un entorno conda separado (`vmtk_env`). El pipeline principal lo invoca como subproceso:
+
+```
+Pipeline Python 3.13 → subprocess conda run → vmtk_worker.py (Python 3.9)
+                                                ↓
+                                    pa_surface.obj + centerlines.vtp + radius_data.npz
+```
+
+Si VMTK no está disponible, el sistema usa el `distance_transform_edt` del skeletonize existente como fallback, manteniendo el funcionamiento completo.
+
+---
+
 ## ETAPA 2: Análisis Geométrico (Tensores)
 
 Aquí es donde MART busca estructuras que tengan forma de vasos sanguíneos.
