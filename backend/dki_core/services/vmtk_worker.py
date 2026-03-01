@@ -1,22 +1,29 @@
 """
 VMTK Worker — Standalone script that runs inside the 'vmtk_env' conda environment.
 
-Invocation (from main pipeline via subprocess):
-    conda run -n vmtk_env python vmtk_worker.py \
-        --input /path/pa_mask.nii.gz \
-        --spacing "1.0,1.0,1.0" \
-        --output-dir /path/output/
+Two modes:
 
-Outputs written to --output-dir:
-    pa_surface.obj          - Smooth PA surface mesh for Niivue 3D viewer
-    pa_surface.vtp          - PA surface in VTK PolyData format (for analysis)
-    centerlines.vtp         - VMTK centerlines with MaximumInscribedSphereRadius attribute
-    radius_data.npz         - radius_map (3D array) + centerline_coords + radii
-    metadata.json           - Success flag + summary stats
+  --mode mesh  (default)
+    Input:  binary PA mask NIfTI + spacing
+    Output: pa_surface.obj, pa_surface.vtp, centerlines.vtp, radius_data.npz, metadata.json
 
-Usage example:
+  --mode segment
+    Input:  raw CT volume NIfTI (float32 HU) + spacing + seed voxel "x,y,z"
+    Output: pa_mask.nii.gz (binary, includes dark thrombus core), metadata.json
+    Uses VMTK Level Set Segmentation: gradient/edge-based, NOT HU threshold.
+    The stopping function is the vessel WALL, so the surface grows through bright
+    blood AND dark thrombus regions without clipping them.
+
+Invocation examples:
+    # Mesh mode (existing)
     conda run -n vmtk_env python vmtk_worker.py \
-        --input /tmp/pa_mask.nii.gz --spacing "1.0,1.0,1.0" --output-dir /tmp/vmtk_out/
+        --mode mesh --input /path/pa_mask.nii.gz \
+        --spacing "1.0,1.0,1.0" --output-dir /path/output/
+
+    # Segment mode (new)
+    conda run -n vmtk_env python vmtk_worker.py \
+        --mode segment --input /path/ct.nii.gz \
+        --spacing "1.0,1.0,1.0" --seed "128,200,45" --output-dir /path/output/
 """
 
 import sys
@@ -33,10 +40,16 @@ import numpy as np
 
 def parse_args():
     parser = argparse.ArgumentParser(description="VMTK vascular geometry pipeline")
-    parser.add_argument("--input", required=True, help="Path to binary PA mask NIfTI (.nii.gz)")
+    parser.add_argument("--mode", choices=["mesh", "segment"], default="mesh",
+                        help="mesh: surface+centerlines from binary PA mask; "
+                             "segment: level-set segmentation from raw CT")
+    parser.add_argument("--input", required=True,
+                        help="Path to input NIfTI (.nii.gz): PA mask (mesh mode) or CT volume (segment mode)")
     parser.add_argument("--spacing", required=True,
-                        help="Voxel spacing as 'x,y,z' in mm (e.g. '1.0,1.0,1.0')")
+                        help="Voxel spacing as 'sz,sy,sx' in mm (e.g. '1.0,1.0,1.0')")
     parser.add_argument("--output-dir", required=True, help="Directory where outputs are written")
+    parser.add_argument("--seed", type=str, default=None,
+                        help="Seed voxel coords 'x_vox,y_vox,z_vox' — required for segment mode")
     return parser.parse_args()
 
 
@@ -294,12 +307,135 @@ def detect_truncated_branches(centerlines_pd, mask, spacing, min_pa_voxels=50):
 
 
 # ---------------------------------------------------------------------------
-# Main pipeline
+# Segment mode — VMTK Level Set Segmentation from raw CT
 # ---------------------------------------------------------------------------
 
-def main():
-    args = parse_args()
+def segment_mode(args):
+    """
+    Level-set segmentation of the pulmonary artery tree from a raw CT HU volume.
 
+    The stopping function is the vessel WALL (gradient magnitude), not internal
+    HU brightness.  This allows the growing surface to "swallow" dark thrombus
+    regions (60-80 HU) that would be missed by a pure HU threshold.
+
+    Inputs:
+        args.input   — NIfTI (float32 HU), shape (z, y, x)
+        args.spacing — "sz,sy,sx" in mm
+        args.seed    — "x_vox,y_vox,z_vox" in voxel space of the input volume
+
+    Outputs (written to args.output_dir):
+        pa_mask.nii.gz  — binary uint8 mask of the PA lumen (incl. thrombus)
+        metadata.json   — {ok, mode, n_voxels, seed_mm, seed_vox}
+    """
+    import nibabel as nib
+    import vtk
+    from vtk.util import numpy_support
+    from vmtk import vmtkscripts
+
+    output_dir = args.output_dir
+    os.makedirs(output_dir, exist_ok=True)
+
+    meta = {"ok": False, "mode": "levelset", "error": None}
+    meta_path = os.path.join(output_dir, "metadata.json")
+
+    try:
+        if args.seed is None:
+            raise ValueError("--seed is required for segment mode")
+
+        # 1. Load CT volume -------------------------------------------------
+        print("[VMTK-SEG] Loading CT volume...", flush=True)
+        ct_img = nib.load(args.input)
+        ct_data = ct_img.get_fdata().astype(np.float32)
+        spacing = [float(s) for s in args.spacing.split(",")]   # [sz, sy, sx]
+        nz, ny, nx = ct_data.shape
+        print(f"[VMTK-SEG] Volume shape (z,y,x): {ct_data.shape}, spacing: {spacing}", flush=True)
+
+        # 2. Parse seed (x_vox, y_vox, z_vox) --------------------------------
+        seed_vox = [int(v) for v in args.seed.split(",")]   # [x_vox, y_vox, z_vox]
+        # Convert to mm: x_mm = x_vox * sx (spacing[2]), y_mm *= sy, z_mm *= sz
+        seed_mm = [
+            seed_vox[0] * spacing[2],   # x
+            seed_vox[1] * spacing[1],   # y
+            seed_vox[2] * spacing[0],   # z
+        ]
+        print(f"[VMTK-SEG] Seed: voxel={seed_vox}, mm={seed_mm}", flush=True)
+
+        # 3. Convert numpy (z,y,x) → vtkImageData (x,y,z) -------------------
+        # VTK stores scalars in Fortran (x-fastest) order, numpy array is (z,y,x).
+        vtk_image = vtk.vtkImageData()
+        vtk_image.SetDimensions(nx, ny, nz)
+        vtk_image.SetSpacing(spacing[2], spacing[1], spacing[0])   # (sx, sy, sz)
+        vtk_image.SetOrigin(0.0, 0.0, 0.0)
+        # Transpose to (x,y,z) then flatten in Fortran order for VTK
+        flat = np.asfortranarray(ct_data.T).ravel(order="F").astype(np.float32)
+        vtk_arr = numpy_support.numpy_to_vtk(flat, deep=True, array_type=vtk.VTK_FLOAT)
+        vtk_arr.SetName("HounsfieldUnits")
+        vtk_image.GetPointData().SetScalars(vtk_arr)
+
+        # 4. Create seed VTK PolyData ----------------------------------------
+        seed_points = vtk.vtkPoints()
+        seed_points.InsertNextPoint(seed_mm[0], seed_mm[1], seed_mm[2])
+        seed_polydata = vtk.vtkPolyData()
+        seed_polydata.SetPoints(seed_points)
+
+        # 5. VMTK Level Set Segmentation ------------------------------------
+        print(f"[VMTK-SEG] Running level-set segmentation (500 iter)...", flush=True)
+        lseg = vmtkscripts.vmtkLevelSetSegmentation()
+        lseg.Image = vtk_image
+        lseg.Seeds = seed_polydata
+        lseg.NumberOfIterations = 500
+        lseg.PropagationScaling = 1.0
+        lseg.CurvatureScaling = 0.5
+        lseg.AdvectionScaling = 1.0
+        lseg.Execute()
+
+        # 6. Threshold: inside vessel = level set ≤ 0 -----------------------
+        ls_scalars = lseg.LevelSets.GetPointData().GetScalars()
+        ls_array = numpy_support.vtk_to_numpy(ls_scalars)
+        # Reshape back to (z, y, x): VTK stored in Fortran (x,y,z) order
+        ls_3d = ls_array.reshape((nx, ny, nz), order="F").T   # → (z, y, x)
+        pa_mask = (ls_3d <= 0).astype(np.uint8)
+
+        # 7. Basic cleanup — remove tiny isolated fragments ------------------
+        from scipy.ndimage import label as ndlabel
+        labeled, n_comp = ndlabel(pa_mask)
+        if n_comp > 0:
+            sizes = np.bincount(labeled.ravel())
+            sizes[0] = 0
+            keep = sizes >= 20   # min 20 voxels per component
+            pa_mask = keep[labeled].astype(np.uint8)
+        print(f"[VMTK-SEG] PA mask: {pa_mask.sum():,} voxels from {n_comp} components", flush=True)
+
+        # 8. Save outputs ---------------------------------------------------
+        affine = np.diag([spacing[0], spacing[1], spacing[2], 1.0])
+        mask_path = os.path.join(output_dir, "pa_mask.nii.gz")
+        nib.save(nib.Nifti1Image(pa_mask, affine), mask_path)
+        print(f"[VMTK-SEG] Mask saved: {mask_path}", flush=True)
+
+        meta.update({
+            "ok": True,
+            "n_voxels": int(pa_mask.sum()),
+            "seed_mm": seed_mm,
+            "seed_vox": seed_vox,
+        })
+
+    except Exception as e:
+        meta["error"] = str(e)
+        print(f"[VMTK-SEG][ERROR] {e}", flush=True)
+        print(traceback.format_exc(), flush=True)
+
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"[VMTK-SEG] Done. ok={meta['ok']}", flush=True)
+    return 0 if meta["ok"] else 1
+
+
+# ---------------------------------------------------------------------------
+# Mesh mode pipeline (original)
+# ---------------------------------------------------------------------------
+
+def mesh_mode(args):
+    """Surface mesh + centerlines from a binary PA mask NIfTI."""
     os.makedirs(args.output_dir, exist_ok=True)
     spacing = tuple(float(s) for s in args.spacing.split(","))
     meta = {"ok": False, "error": None, "n_centerline_points": 0, "n_surface_cells": 0,
@@ -401,7 +537,19 @@ def main():
         json.dump(meta, f, indent=2)
 
     print(f"[VMTK] Done. Success={meta['ok']}", flush=True)
-    sys.exit(0 if meta["ok"] else 1)
+    return 0 if meta["ok"] else 1
+
+
+# ---------------------------------------------------------------------------
+# Entry point — routes to mesh_mode or segment_mode
+# ---------------------------------------------------------------------------
+
+def main():
+    args = parse_args()
+    if args.mode == "segment":
+        sys.exit(segment_mode(args))
+    else:
+        sys.exit(mesh_mode(args))
 
 
 if __name__ == "__main__":

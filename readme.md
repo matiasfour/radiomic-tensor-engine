@@ -84,12 +84,21 @@ El motor TEP implementa un pipeline de 9 etapas con múltiples filtros de seguri
 4. HU EXCLUSION        → Eliminar hueso (>700 HU) y aire (<-900 HU)
 5. MEDIASTINAL CROP    → ROI de 250mm × 250mm centrado en mediastino
 6. CONTRAST CHECK      → Verificar contraste adecuado (150-500 HU)
+4.5. CENTERLINE EXTRACTION → Esqueleto 3D del árbol arterial (skeletonize + distance map)
+4.6. VMTK GEOMETRIC ANALYSIS
+   ├─ Marching Cubes sobre pa_mask → superficie vascular suavizada (Laplaciano 30 iter)
+   ├─ vmtkNetworkExtraction → centerlines con MaximumInscribedSphereRadius por punto
+   ├─ Radio map por vóxel (interpolación al espacio voxel completo)
+   ├─ Gate R+: restringe detección a dist_from_centerline ≤ radio×1.2 + 1.5mm
+   ├─ Detección de ramas truncadas (oclusiones silenciosas)
+   └─ Export: pa_surface.obj + thrombus.obj + centerlines.vtp para visor 3D
 7. SEGMENTATION + DETECTION
-   ├─ 7a. Segmentar Arterias Pulmonares (HU 150-500)
-   ├─ 7b. MULTI-SCALE HESSIAN: Identificar estructuras tubulares (micro-vasos 1-2px + grandes)
-   ├─ 7c. VASCULAR COHERENCE: Structure Tensor Analysis (CI)
-   ├─ 7d. Calcular MK (Mean Kurtosis) & FAC (Anisotropía)
-   ├─ 7e. SCORING MULTI-CRITERIO:
+   ├─ 7a. Segmentar Arterias Pulmonares (HU 150-500) — Seed dual: HU≥150 + HU≥80+MK>1.0
+   ├─ 7b. VMTK GATE R+: Restricción al interior geométrico real del vaso
+   ├─ 7c. MULTI-SCALE HESSIAN: Identificar estructuras tubulares (micro-vasos 1-2px + grandes)
+   ├─ 7d. VASCULAR COHERENCE: Structure Tensor Analysis (CI)
+   ├─ 7e. Calcular MK (Mean Kurtosis) & FAC (Anisotropía)
+   ├─ 7f. SCORING MULTI-CRITERIO:
    │      - Densidad HU: +3.0 pts
    │      - Kurtosis MK: +1.0 pts
    │      - Anisotropía FAC: +1.0 pts
@@ -125,6 +134,7 @@ El motor TEP implementa un pipeline de 9 etapas con múltiples filtros de seguri
 | **1:1 Spatial Alignment**    | Ajuste perfecto CT-Heatmap         | Reconstrucción a (Z, Y, X)|
 | **Format Iron Dome**         | Protege arrays bidimensionales     | Auto expand a 3D          |
 | **Dynamic Diaphragm**        | Detección adaptativa del diafragma | soft tissue > 40%         |
+| **VMTK Gate R+**             | Restringe detección al interior vascular real | dist ≤ radio×1.2 + 1.5mm |
 
 ---
 
@@ -238,7 +248,8 @@ dki_core/services/
 ├── dicom_service.py            # Carga y extracción DICOM
 ├── discovery_service.py        # Auto-detección de modalidad
 ├── validation_service.py       # Validación de estudios
-├── tep_processing_service.py   # Procesamiento TEP (2000+ líneas)
+├── tep_processing_service.py   # Procesamiento TEP (4200+ líneas)
+├── vmtk_worker.py              # Worker VMTK (ejecuta en conda env separado)
 ├── ct_processing_service.py    # Procesamiento CT genérico
 ├── clinical_recommendation_service.py  # Orquestador de recomendaciones
 └── audit_report_service.py     # Generador de PDF (840+ líneas)
@@ -264,6 +275,11 @@ class ProcessingResult:
 
     clot_count, contrast_quality, mean_thrombus_kurtosis
     audit_report  # PDF
+
+    # VMTK 3D Geometry (Phase 7)
+    pa_mesh        # Smooth PA surface mesh (.obj) para visor 3D
+    thrombus_mesh  # Thrombus mesh (.obj) — overlay rojo en visor 3D
+    centerline_vtp # Centerlines con MaximumInscribedSphereRadius (.vtp)
 
     # CT SMART Results
     entropy_map, glcm_map, heatmap, brain_mask
@@ -315,8 +331,10 @@ Este test valida que el domain_mask mantiene conectividad ininterrumpida desde e
 | DIPY                  | ≥1.7    | Diffusion Kurtosis Imaging |
 | NiBabel               | ≥5.1    | Lectura/escritura NIfTI    |
 | PyDicom               | ≥2.4    | Lectura DICOM              |
-| scikit-image          | ≥0.21   | Morfología, skeletonize    |
+| scikit-image          | ≥0.21   | Morfología, skeletonize, marching_cubes |
 | Matplotlib            | ≥3.7    | Generación de gráficos/PDF |
+| VMTK                  | ≥1.5    | Centerlines vasculares, suavizado de superficie |
+| VTK                   | ≥8.x    | Marching Cubes, export OBJ/VTP (via vmtk_env) |
 
 ### Frontend
 
@@ -444,6 +462,14 @@ RADIOMIC_ENGINE = {
 | `roi_heatmap.nii.gz`   | Heatmap con ROI superpuesto (cyan) |
 | `kurtosis_map.nii.gz`  | Mapa de Mean Kurtosis              |
 
+### Mallas 3D VMTK (.obj / .vtp)
+
+| Archivo                   | Contenido                                        |
+| ------------------------- | ------------------------------------------------ |
+| `pa_surface.obj`          | Superficie suavizada del árbol arterial pulmonar |
+| `thrombus.obj`            | Modelo 3D de trombos detectados (overlay rojo)   |
+| `centerlines.vtp`         | Centerlines con radio inscrito por punto         |
+
 ### Audit Report (PDF)
 
 El sistema genera automáticamente un reporte PDF de auditoría que incluye:
@@ -473,6 +499,7 @@ El sistema implementa un disclaimer legal en todos los reportes generados confor
 - [x] Validación Laplacian de bordes óseos
 - [x] Test de continuidad anatómica
 - [x] Generación de Audit Report PDF
+- [x] Integración VMTK — Malla vascular 3D + Gate R+ geométrico
 - [ ] Pipeline CT_SMART (Isquemia) completo
 - [ ] Pipeline MRI_DKI completo
 - [ ] Comparador de referencia (follow-up studies)
@@ -493,7 +520,7 @@ Este proyecto sigue el patrón Strategy para facilitar la extensión. Para agreg
 
 ---
 
-**Última actualización**: Enero 2026
+**Última actualización**: Marzo 2026
 
 
 source .venv/bin/activate

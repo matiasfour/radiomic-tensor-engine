@@ -150,24 +150,59 @@ const STRATEGIES: Strategy[] = [
 				outputs: ["contrast_quality", "is_contrast_optimal"],
 			},
 			{
+				id: "tep-4-5",
+				name: "4.5. CENTERLINE EXTRACTION",
+				service: "TEPProcessingService._extract_vessel_centerline()",
+				description: "3D skeletonization of PA mask — 1-voxel centerline + distance map",
+				substeps: [
+					"skeletonize_3d(pa_mask) → binary skeleton",
+					"distance_transform_edt(~centerline) → radius approximation",
+					"_find_skeleton_branch_points() → vessel junctions",
+				],
+				outputs: ["centerline (3D mask)", "centerline_info.distance_map", "branch_points"],
+			},
+			{
+				id: "tep-4-6",
+				name: "4.6. VMTK GEOMETRIC ANALYSIS",
+				service: "TEPProcessingService._run_vmtk_pipeline()",
+				description: "Vascular Modeling Toolkit — smooth surface + true centerline radius for detection gating",
+				isNew: true,
+				substeps: [
+					"4.6a. Marching Cubes on pa_mask → raw surface",
+					"4.6b. Laplacian smoothing (Windowed-Sinc, 30 iter)",
+					"4.6c. vmtkNetworkExtraction → centerlines with MaximumInscribedSphereRadius",
+					"4.6d. Interpolate radius to voxel space → radius_map (float32 3D)",
+					"4.6e. Detect truncated branches (silent total occlusions)",
+					"4.6f. Export pa_surface.obj + centerlines.vtp for 3D viewer",
+					"4.6g. Runs in isolated conda env (vmtk_env) via subprocess",
+				],
+				outputs: [
+					"pa_surface.obj",
+					"centerlines.vtp",
+					"radius_map (float32 3D)",
+					"vmtk_truncated_branches",
+				],
+			},
+			{
 				id: "tep-7",
 				name: "7. SEGMENTATION + DETECTION",
 				service: "TEPProcessingService._detect_filling_defects_enhanced()",
 				description: "Multi-criteria thrombus detection with scoring",
 				isNew: true,
 				substeps: [
-					"7a. Segment Pulmonary Arteries (HU 150-500)",
-					"7b. HESSIAN PLATE FILTER: Compute Eigenvalues & Vesselness",
-					"7c. Remove Ribs: Plate Ratio (Ra) < 0.35 (Relaxed)",
-					"7d. Calculate MK (Mean Kurtosis) map",
-					"7e. Calculate FAC (Fractional Anisotropy) map",
-					"7f. VASCULAR COHERENCE: Structure Tensor analysis (CI)",
-					"7g. SCORING: HU=3pts, MK=1pt, FAC=1pt, Rupture(CI)=2pts",
-					"7h. NC MODE: Adaptive confidence scoring if non-contrast",
-					"7i. CONTRAST INHIBITOR: HU>220 → Score=0",
-					"7j. LAPLACIAN BONE VALIDATION: gradient > 500HU → discard",
-					"7k. MORPHOMETRIC FILTER: Exclude Bronchi (Rugosity + Air-Core)",
-					"7l. SURFACE PHYSICS (Tenor): Validate Rugosity, FAC, Coherence",
+					"7a. Segment Pulmonary Arteries — dual seed: HU≥150 + HU≥80+MK>1.0",
+					"7b. VMTK GATE R+: candidates restricted to dist≤radius×1.2+1.5mm",
+					"7c. HESSIAN PLATE FILTER: Compute Eigenvalues & Vesselness",
+					"7d. Remove Ribs: Plate Ratio (Ra) < 0.35 (Relaxed)",
+					"7e. Calculate MK (Mean Kurtosis) map",
+					"7f. Calculate FAC (Fractional Anisotropy) map",
+					"7g. VASCULAR COHERENCE: Structure Tensor analysis (CI)",
+					"7h. SCORING: HU=3pts, MK=1pt, FAC=1pt, Rupture(CI)=2pts",
+					"7i. NC MODE: Adaptive confidence scoring if non-contrast",
+					"7j. CONTRAST INHIBITOR: HU>220 → Score=0",
+					"7k. LAPLACIAN BONE VALIDATION: gradient > 500HU → discard",
+					"7l. MORPHOMETRIC FILTER: Exclude Bronchi (Rugosity + Air-Core)",
+					"7m. SURFACE PHYSICS (Tensor): Validate Rugosity, FAC, Coherence",
 				],
 				outputs: [
 					"thrombus_mask",
@@ -220,6 +255,9 @@ const STRATEGIES: Strategy[] = [
 					"10b. Save coherence_map.nii.gz (flow analysis)",
 					"10c. Save pseudocolor_map.nii.gz (density visualization)",
 					"10d. Generate audit.pdf report with Coherence Validation",
+					"10e. Copy VMTK pa_surface.obj → media/results/meshes/pa/",
+					"10f. Generate thrombus.obj via skimage marching_cubes",
+					"10g. Copy centerlines.vtp → media/results/meshes/centerline/",
 				],
 				outputs: [
 					"heatmap.nii.gz",
@@ -227,6 +265,9 @@ const STRATEGIES: Strategy[] = [
 					"pseudocolor_map.nii.gz",
 					"pa_mask.nii.gz",
 					"thrombus_mask.nii.gz",
+					"pa_surface.obj (VMTK)",
+					"thrombus.obj",
+					"centerlines.vtp (VMTK)",
 					"audit.pdf",
 				],
 			},
@@ -594,7 +635,7 @@ const ArchitectureDiagram: React.FC = () => {
 					← Back to Studies
 				</button>
 				<h1>🔬 Radiomic Tensorial Workstation - Architecture</h1>
-				<span className="version">v2.0</span>
+				<span className="version">v2.1</span>
 			</header>
 
 			<main className="arch-main">

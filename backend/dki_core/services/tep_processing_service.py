@@ -488,20 +488,64 @@ class TEPProcessingService:
              pa_info = {'method': 'LUNG_MASK_FALLBACK (NC_MODE)'}
         else:
              if log_callback:
-                 log_callback("Step 4/9: Segmenting pulmonary arteries...")
+                 log_callback(
+                     "Step 4/9: Segmenting pulmonary arteries "
+                     "(VMTK Level Set [primary] → HU dual-seed [fallback])..."
+                 )
 
-             # Phase 2 Adaptive Thresholding: If contrast is poor, we must lower the 150 HU bar.
-             # We use 45% of the measured mean arterial HU, but never go below 80 HU (muscle/blood baseline).
-             base_hu = getattr(self, 'mean_arterial_hu', 300)
-             dynamic_min_hu = max(80, int(base_hu * 0.45))
+             vmtk_seg_success = False
 
-             pa_mask, pa_info = self._segment_pulmonary_arteries(
-                 working_data,
-                 lung_mask,
-                 dynamic_min_hu=dynamic_min_hu,
-                 log_callback=log_callback,
-                 mk_map=mk_map              # Dual-seed: dark-core massive PE recovery
-             )
+             # ── PRIMARY: VMTK Level Set ─────────────────────────────────────────
+             # Gradient/edge-based deformable model: stopping function = vessel WALL.
+             # Grows through bright blood AND dark thrombus (60-80 HU) without clipping.
+             if self._vmtk_available():
+                 if log_callback:
+                     log_callback("   [VMTK] Searching for PA seed (HU>200, central ROI)...")
+                 seed = self._find_pa_seed(working_data, spacing, lung_mask)
+                 if seed is not None:
+                     pa_mask_vmtk = self._run_vmtk_segmentation(
+                         working_data, seed, spacing, log_callback=log_callback
+                     )
+                     if pa_mask_vmtk is not None and pa_mask_vmtk.sum() > 1000:
+                         pa_mask = pa_mask_vmtk
+                         pa_info = {
+                             'method': 'VMTK_LEVELSET',
+                             'seed_voxel': seed,
+                             'total_voxels': int(pa_mask.sum()),
+                         }
+                         vmtk_seg_success = True
+                         if log_callback:
+                             log_callback(
+                                 f"   ✅ [VMTK] Level-set PA mask accepted: "
+                                 f"{pa_mask.sum():,} vx — dark thrombus core included"
+                             )
+                     else:
+                         if log_callback:
+                             log_callback(
+                                 "   ⚠️ [VMTK] Level-set output empty or too small → HU fallback"
+                             )
+                 else:
+                     if log_callback:
+                         log_callback(
+                             "   ⚠️ [VMTK] No bright-blood seed found in central ROI → HU fallback"
+                         )
+
+             # ── FALLBACK: HU dual-seed ──────────────────────────────────────────
+             # Classic method: HU ≥ dynamic_min_hu (primary) + HU≥80 + MK>1.0 (dark recovery).
+             if not vmtk_seg_success:
+                 if log_callback:
+                     log_callback("   ↩️  [HU] Running HU-based dual-seed segmentation...")
+                 # Adaptive threshold: 45% of mean arterial HU, floor at 80 HU.
+                 base_hu = getattr(self, 'mean_arterial_hu', 300)
+                 dynamic_min_hu = max(80, int(base_hu * 0.45))
+
+                 pa_mask, pa_info = self._segment_pulmonary_arteries(
+                     working_data,
+                     lung_mask,
+                     dynamic_min_hu=dynamic_min_hu,
+                     log_callback=log_callback,
+                     mk_map=mk_map      # Dual-seed: dark-core massive PE recovery
+                 )
         
         self._log_tensor_stats("02_PA_Mask", pa_mask, log_callback)
          
@@ -3681,15 +3725,182 @@ class TEPProcessingService:
     _vmtk_checked = False
     _vmtk_ok = None  # cached availability flag
 
+    @staticmethod
+    def _vmtk_conda_args():
+        """
+        Return the conda run prefix arguments for the VMTK environment.
+
+        On Lightning.ai the start_server.sh exports VMTK_ENV_DIR pointing to
+        the persistent conda prefix (/teamspace/.../vmtk_env).  Locally the
+        env is installed under the default name 'vmtk_env'.
+
+        Using --no-capture-output ensures subprocess stdout/stderr stream in
+        real-time rather than being buffered by conda.
+        """
+        prefix = os.environ.get('VMTK_ENV_DIR', '')
+        if prefix and os.path.isdir(prefix):
+            return ['conda', 'run', '--no-capture-output', '--prefix', prefix]
+        return ['conda', 'run', '--no-capture-output', '-n', 'vmtk_env']
+
+    def _find_pa_seed(self, data, spacing, lung_mask=None):
+        """
+        Auto-detect a reliable seed voxel inside the main pulmonary artery trunk.
+
+        Strategy: find the largest bright-blood connected component (HU > 200)
+        inside the central 40 % bounding box of the volume.  This avoids
+        peripheral arteries, the aorta margin, and sub-diaphragmatic vessels.
+
+        Args:
+            data:       3-D numpy array (z, y, x) in HU
+            spacing:    [sz, sy, sx] in mm (not used here, kept for API symmetry)
+            lung_mask:  optional boolean mask to restrict search to lung ROI
+
+        Returns:
+            (z_vox, y_vox, x_vox) in full-volume coordinates, or None if no
+            HU > 200 region is found in the central bounding box.
+        """
+        nz, ny, nx = data.shape
+        # Central 40 % box — avoids peripheral arteries and bony structures
+        z0, z1 = int(nz * 0.30), int(nz * 0.70)
+        y0, y1 = int(ny * 0.20), int(ny * 0.80)
+        x0, x1 = int(nx * 0.20), int(nx * 0.80)
+
+        roi = data[z0:z1, y0:y1, x0:x1] > 200
+        if lung_mask is not None:
+            roi = roi & lung_mask[z0:z1, y0:y1, x0:x1]
+
+        labeled, n = label(roi)
+        if n == 0:
+            logger.info("[VMTK] _find_pa_seed: no HU>200 region in central ROI")
+            return None
+
+        sizes = np.bincount(labeled.ravel())
+        sizes[0] = 0
+        best = int(np.argmax(sizes))
+        com = center_of_mass(labeled == best)   # (z_local, y_local, x_local)
+        seed = (int(com[0]) + z0, int(com[1]) + y0, int(com[2]) + x0)
+        logger.info(
+            f"[VMTK] PA seed found at voxel {seed}  "
+            f"HU={data[seed]:.0f}  component_size={int(sizes[best])}"
+        )
+        return seed
+
+    def _run_vmtk_segmentation(self, volume_data, seed_coords, spacing, log_callback=None):
+        """
+        Call vmtk_worker.py --mode segment to perform level-set PA segmentation.
+
+        The worker runs inside the isolated vmtk_env conda environment.  It uses
+        VMTK's vmtkLevelSetSegmentation whose stopping function is the VESSEL WALL
+        gradient — NOT internal HU brightness — so the resulting pa_mask includes
+        dark thrombus regions (60-80 HU) that are missed by pure HU thresholding.
+
+        Args:
+            volume_data:  3-D float32 numpy array (z, y, x) in HU
+            seed_coords:  (z_vox, y_vox, x_vox) — center of main PA trunk
+            spacing:      [sz, sy, sx] in mm
+            log_callback: optional function(str) for real-time log forwarding
+
+        Returns:
+            Boolean numpy ndarray with the same shape as volume_data,
+            or None on any failure.
+        """
+        if not self._vmtk_available():
+            return None
+
+        try:
+            import nibabel as nib
+
+            worker_path = os.path.join(os.path.dirname(__file__), 'vmtk_worker.py')
+
+            with tempfile.TemporaryDirectory(prefix='vmtk_seg_') as tmp_dir:
+                # Save CT volume as float32 NIfTI
+                ct_path = os.path.join(tmp_dir, 'ct_volume.nii.gz')
+                affine = np.diag([spacing[0], spacing[1], spacing[2], 1.0])
+                nib.save(
+                    nib.Nifti1Image(volume_data.astype(np.float32), affine),
+                    ct_path,
+                )
+
+                out_dir = os.path.join(tmp_dir, 'seg_out')
+                os.makedirs(out_dir, exist_ok=True)
+
+                # Seed: worker expects "x_vox,y_vox,z_vox"
+                sz, sy, sx = seed_coords
+                seed_str = f"{sx},{sy},{sz}"
+                spacing_str = f"{spacing[0]},{spacing[1]},{spacing[2]}"
+
+                cmd = TEPProcessingService._vmtk_conda_args() + [
+                    'python', worker_path,
+                    '--mode', 'segment',
+                    '--input', ct_path,
+                    '--spacing', spacing_str,
+                    '--seed', seed_str,
+                    '--output-dir', out_dir,
+                ]
+
+                if log_callback:
+                    log_callback(
+                        f"   ⚙️ [VMTK-SEG] Launching level-set subprocess "
+                        f"(seed voxel={seed_coords})..."
+                    )
+
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+                for line in proc.stdout.splitlines():
+                    if log_callback and line.strip():
+                        log_callback(f"   {line}")
+
+                if proc.returncode != 0:
+                    if log_callback:
+                        log_callback(
+                            f"   ❌ [VMTK-SEG] Worker exited rc={proc.returncode}: "
+                            f"{proc.stderr[:300]}"
+                        )
+                    return None
+
+                meta_path = os.path.join(out_dir, 'metadata.json')
+                if not os.path.exists(meta_path):
+                    return None
+                with open(meta_path) as f:
+                    meta = json.load(f)
+                if not meta.get('ok'):
+                    if log_callback:
+                        log_callback(
+                            f"   ❌ [VMTK-SEG] Segmentation failed: {meta.get('error')}"
+                        )
+                    return None
+
+                mask_path = os.path.join(out_dir, 'pa_mask.nii.gz')
+                if not os.path.exists(mask_path):
+                    return None
+                pa_mask = (nib.load(mask_path).get_fdata() > 0.5)
+
+                if log_callback:
+                    log_callback(
+                        f"   ✅ [VMTK-SEG] Level-set PA mask: {pa_mask.sum():,} voxels "
+                        f"(dark thrombus core included)"
+                    )
+                return pa_mask
+
+        except subprocess.TimeoutExpired:
+            if log_callback:
+                log_callback("   ❌ [VMTK-SEG] Subprocess timed out after 300 s")
+            return None
+        except Exception as e:
+            logger.warning(f"[VMTK] _run_vmtk_segmentation exception: {e}")
+            if log_callback:
+                log_callback(f"   ❌ [VMTK-SEG] Exception: {e}")
+            return None
+
     def _vmtk_available(self):
         """Check once whether the vmtk_env conda environment is usable."""
         if TEPProcessingService._vmtk_checked:
             return TEPProcessingService._vmtk_ok
         try:
-            r = subprocess.run(
-                ['conda', 'run', '-n', 'vmtk_env', 'python', '-c', 'import vmtk; import vtk'],
-                capture_output=True, text=True, timeout=30
-            )
+            cmd = TEPProcessingService._vmtk_conda_args() + [
+                'python', '-c', 'import vmtk; import vtk'
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             TEPProcessingService._vmtk_ok = (r.returncode == 0)
         except Exception:
             TEPProcessingService._vmtk_ok = False
@@ -3729,8 +3940,9 @@ class TEPProcessingService:
                 os.makedirs(out_dir, exist_ok=True)
 
                 # --- Invoke worker ---
-                cmd = [
-                    'conda', 'run', '-n', 'vmtk_env', 'python', worker_path,
+                cmd = TEPProcessingService._vmtk_conda_args() + [
+                    'python', worker_path,
+                    '--mode', 'mesh',
                     '--input', mask_path,
                     '--spacing', spacing_str,
                     '--output-dir', out_dir,

@@ -85,6 +85,12 @@ WSGI_APPLICATION = 'dki_backend.wsgi.application'
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
 if os.environ.get('LIGHTNING_CLOUD') == 'true':
+    # Lightning AI sits behind an HTTPS-terminating proxy. Without these settings
+    # Django's build_absolute_uri() returns http:// URLs, which the browser blocks
+    # as mixed content when the page is served over https://.
+    USE_X_FORWARDED_HOST = True
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
     # Configuración para Lightning AI
     DATABASES = {
         'default': {

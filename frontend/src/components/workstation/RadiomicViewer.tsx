@@ -1045,6 +1045,14 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 						nv.setSliceType(nv.sliceTypeRender);
 						setNiivueInstance(nv);
 
+						// Force https:// when page is served over HTTPS (Lightning.ai mixed-content fix)
+						const toSafeUrl = (url: string): string => {
+							if (window.location.protocol === 'https:' && url.startsWith('http:')) {
+								return 'https:' + url.slice(5);
+							}
+							return url;
+						};
+
 						// Load Volumes (moved inside success block)
 						const volumes = [];
 
@@ -1052,7 +1060,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 						// Prioritize NIfTI source volume (3D Viewer compatible)
 						if (results?.source_volume) {
 							volumes.push({
-								url: results.source_volume,
+								url: toSafeUrl(results.source_volume),
 								opacity: 0.1,
 								colormap: "gray",
 								visible: true,
@@ -1060,7 +1068,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 						} else if (results?.tep_pa_mask) {
 							// Fallback to PA mask if no source volume (prevents crash on old studies)
 							volumes.push({
-								url: results.tep_pa_mask,
+								url: toSafeUrl(results.tep_pa_mask),
 								opacity: 0.1,
 								colormap: "gray",
 								visible: true,
@@ -1070,7 +1078,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 						// 2. Heatmap Layer (Pathology)
 						if (results?.tep_heatmap) {
 							volumes.push({
-								url: results.tep_heatmap,
+								url: toSafeUrl(results.tep_heatmap),
 								opacity: 1.0,
 								colormap: "red",
 								cal_min: 2,
@@ -1082,7 +1090,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 						// 3. ROI Layer (Validation)
 						if (results?.tep_roi_heatmap) {
 							volumes.push({
-								url: results.tep_roi_heatmap,
+								url: toSafeUrl(results.tep_roi_heatmap),
 								opacity: 0.3,
 								colormap: "cyan",
 								visible: true,
@@ -1096,7 +1104,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 						const meshes: Parameters<typeof nv.loadMeshes>[0] = [];
 
 						const resolveUrl = (url: string) =>
-							url.startsWith("http") ? url : `${baseUrl}${url}`;
+							toSafeUrl(url.startsWith("http") ? url : `${baseUrl}${url}`);
 
 						if (results?.pa_mesh) {
 							meshes.push({
