@@ -1090,6 +1090,33 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 						}
 
 						nv.loadVolumes(volumes);
+
+						// ── VMTK 3D Mesh Layers ──────────────────────────────────────
+						// PA surface = blue semi-transparent; thrombus = solid red.
+						const meshes: Parameters<typeof nv.loadMeshes>[0] = [];
+
+						const resolveUrl = (url: string) =>
+							url.startsWith("http") ? url : `${baseUrl}${url}`;
+
+						if (results?.pa_mesh) {
+							meshes.push({
+								url: resolveUrl(results.pa_mesh),
+								rgba255: [100, 150, 255, 60],
+								opacity: 0.25,
+							} as never);
+						}
+						if (results?.thrombus_mesh) {
+							meshes.push({
+								url: resolveUrl(results.thrombus_mesh),
+								rgba255: [255, 60, 60, 230],
+								opacity: 0.9,
+							} as never);
+						}
+						if (meshes.length > 0) {
+							nv.loadMeshes(meshes).catch((e: unknown) => {
+								console.warn("[VMTK] Mesh load failed:", e);
+							});
+						}
 					} catch (e) {
 						console.error("Niivue attach failed:", e);
 					}
