@@ -39,18 +39,20 @@ if [ -d "/teamspace/studios/this_studio" ]; then
     sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='matias'" | grep -q 1 || sudo -u postgres psql -c "CREATE USER matias WITH SUPERUSER PASSWORD 'crescendo2026';"
     sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='dki_db'" | grep -q 1 || sudo -u postgres psql -c "CREATE DATABASE dki_db OWNER matias;"
 
-    # 1.e Entorno VMTK en almacenamiento persistente (solo se crea la primera vez)
-    # Los envs en /home/zeus/miniconda3/envs/ se pierden al reiniciar el Studio.
-    # Lo instalamos en /teamspace/ con --prefix para que persista.
-    VMTK_ENV_DIR="/teamspace/studios/this_studio/conda_envs/vmtk_env"
-    export VMTK_ENV_DIR
-    if [ ! -f "$VMTK_ENV_DIR/bin/python" ]; then
-        echo "🔬 Creando entorno VMTK en $VMTK_ENV_DIR (primera vez, ~5-10 min)..."
-        conda create --prefix "$VMTK_ENV_DIR" python=3.9 -y
-        conda install --prefix "$VMTK_ENV_DIR" -c vmtk vmtk -y
-        echo "✅ Entorno VMTK creado correctamente."
+    # 1.e VMTK — Lightning AI sólo permite UN entorno conda (conda create está bloqueado).
+    # Instalamos VMTK directamente en el entorno activo via conda install.
+    # El marcador VMTK_ENV_DIR=SYSTEM le dice al backend que use el python del sistema.
+    export VMTK_ENV_DIR="SYSTEM"
+    if python3 -c "import vmtk; import vtk" 2>/dev/null; then
+        echo "✅ VMTK ya disponible en el entorno activo."
     else
-        echo "✅ Entorno VMTK encontrado en $VMTK_ENV_DIR (omitiendo instalación)."
+        echo "🔬 Instalando VMTK en el entorno activo (primera vez, ~5-10 min)..."
+        conda install -c vmtk vmtk -y
+        if python3 -c "import vmtk; import vtk" 2>/dev/null; then
+            echo "✅ VMTK instalado correctamente."
+        else
+            echo "⚠️  VMTK no disponible — el pipeline usará segmentación HU de respaldo."
+        fi
     fi
 
 else
