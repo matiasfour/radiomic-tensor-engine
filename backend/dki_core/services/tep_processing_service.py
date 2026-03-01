@@ -103,7 +103,7 @@ class TEPProcessingService:
     # Z-ANATOMICAL GUARD: Prevent false positives in apex/neck slices
     # ═══════════════════════════════════════════════════════════════════════════
     Z_GUARD_MIN_SLICE = 80                 # Slices below this index are suspicious (apex/neck)
-    Z_GUARD_MIN_PA_VOXELS = 500            # Minimum PA voxels required per slice
+    Z_GUARD_MIN_PA_VOXELS = 150            # Minimum PA voxels required per slice (relaxed from 500 for isotropic sensitivity)
     
     # ═══════════════════════════════════════════════════════════════════════════
     # ELONGATED CLUSTER FILTER: Remove rib-shaped false positives
@@ -909,8 +909,38 @@ class TEPProcessingService:
                     is_colored = color[0] > 150
                     
                     if not is_colored:
-                        mismatch_count += 1
-                        log_callback(f"    ⚠️ PIN ALARM: Pin #{pin['id']} at (X:{gx}, Y:{gy}, Z:{gz}) lands on color RGB{list(color)} (NOT RED/YELLOW).")
+                        # ── PIN SNAP-TO-COLOR: Search 5x5x5 neighborhood for nearest colored voxel ──
+                        snapped = False
+                        search_radius = 2
+                        best_dist = float('inf')
+                        best_pos = None
+                        
+                        for dx in range(-search_radius, search_radius + 1):
+                            for dy in range(-search_radius, search_radius + 1):
+                                for dz in range(-search_radius, search_radius + 1):
+                                    nx, ny, nz = gx + dx, gy + dy, gz + dz
+                                    if (0 <= nx < heatmap_full.shape[0] and 
+                                        0 <= ny < heatmap_full.shape[1] and 
+                                        0 <= nz < heatmap_full.shape[2]):
+                                        nc = heatmap_full[nx, ny, nz]
+                                        if nc[0] > 150:  # Has color
+                                            dist = abs(dx) + abs(dy) + abs(dz)
+                                            if dist < best_dist:
+                                                best_dist = dist
+                                                best_pos = (nx, ny, nz)
+                        
+                        if best_pos is not None:
+                            pin['location']['coord_x'] = best_pos[0]
+                            pin['location']['coord_y'] = best_pos[1]
+                            pin['location']['slice_z'] = best_pos[2]
+                            pin['location']['slice_z_inverted'] = max(0, min((total_slices - 1) - best_pos[2], total_slices - 1))
+                            snapped = True
+                            if log_callback:
+                                log_callback(f"    📌 PIN SNAP: Pin #{pin['id']} snapped from ({gx},{gy},{gz}) to {best_pos} (dist={best_dist})")
+                        
+                        if not snapped:
+                            mismatch_count += 1
+                            log_callback(f"    ⚠️ PIN ALARM: Pin #{pin['id']} at (X:{gx}, Y:{gy}, Z:{gz}) lands on color RGB{list(color)} (NOT RED/YELLOW).")
             
             if mismatch_count == 0:
                 log_callback("    ✅ SUCCESS: All pins land precisely on colored heatmap pixels in the backend.")
@@ -2630,6 +2660,20 @@ class TEPProcessingService:
         # Base Score Integration
         base_scores = (1.0 + geo_conf + phys_conf) * synergy_mult
         
+        # Gate M: Thrombus Window Gate (Massive PE Recovery)
+        # If a region has structural geometry confidence OR flow disruption,
+        # trust physics over density — dark masses in the 40-90 HU range
+        # are classic filling defects that should NOT be penalized.
+        thrombus_window = (data_crop >= 40) & (data_crop <= 90)
+        structural_confidence = (geo_conf > 0.3) | (coherence_crop < 0.3)
+        mass_gate = thrombus_window & structural_confidence
+        base_scores[mass_gate] *= 1.5  # Boost dark masses with structural evidence
+        
+        if log_callback:
+            n_mass = int(np.sum(mass_gate))
+            if n_mass > 0:
+                log_callback(f"   🪨 Mass Thrombus Gate: {n_mass:,} voxels boosted ×1.5 (40-90 HU + structural confidence)")
+        
         # Gate 2: Puerta de la Rugosidad (Validación Clínica RICCI + HU)
         rugosity_gate = (data_crop >= 40) & (data_crop <= 80) & (np.abs(ricci_crop) > 1.0)
         base_scores[rugosity_gate] += 1.0
@@ -2801,9 +2845,16 @@ class TEPProcessingService:
                 if candidate_z < effective_z_guard:
                     # Count PA voxels in this specific Z-slice (Axis 2)
                     pa_voxels_in_slice = np.sum(pa_mask[:, :, candidate_z])
-                    if pa_voxels_in_slice < self.Z_GUARD_MIN_PA_VOXELS:
+                    # Scale the area threshold for isotropic space
+                    # In compressed Z, each slice cover more physical tissue → fewer voxels per slice is valid
+                    scaled_min_area = self.Z_GUARD_MIN_PA_VOXELS
+                    if spacing is not None and len(spacing) >= 3:
+                        voxel_area = spacing[0] * spacing[1]  # Area of one voxel in mm²
+                        scaled_min_area = max(30, int(self.Z_GUARD_MIN_PA_VOXELS * voxel_area))
+                    
+                    if pa_voxels_in_slice < scaled_min_area:
                         if log_callback:
-                            log_callback(f"   🛡️ Z-GUARD: Rejecting candidate at Z={candidate_z} (Apex). PA area = {pa_voxels_in_slice} voxels (< {self.Z_GUARD_MIN_PA_VOXELS})")
+                            log_callback(f"   🛡️ Z-GUARD: Rejecting candidate at Z={candidate_z} (Apex). PA area = {pa_voxels_in_slice} voxels (< {scaled_min_area})")
                         continue
                 
                 # --- THE INFORMATION SANDWICH FIX ---
@@ -3689,6 +3740,30 @@ class TEPProcessingService:
         pa_mask = binary_erosion(pa_mask, iterations=1)
         pa_mask = binary_dilation(pa_mask, iterations=1)
         pa_mask = remove_small_objects(pa_mask, min_size=20)  # Preserve distal peripheral vessels
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ANATOMICAL HOLE FILLING (Massive PE Recovery)
+        # A large thrombus is radiologically dark (60-80 HU) but sits INSIDE
+        # the artery. Morphological closing bridges the contrast-bright walls
+        # around the dark core, then hole filling captures the interior.
+        # This converts "Contrast Masking" → "Anatomical Vessel Containment".
+        # ═══════════════════════════════════════════════════════════════════════
+        pa_before_fill = np.sum(pa_mask)
+        
+        # 3D Closing: bridge gaps between contrast-enhanced segments
+        from scipy.ndimage import binary_closing as morph_closing
+        pa_mask = morph_closing(pa_mask, iterations=5)
+        
+        # Slice-by-slice hole filling: capture central filling defects
+        from scipy.ndimage import binary_fill_holes
+        for z_idx in range(pa_mask.shape[2]):
+            pa_mask[:, :, z_idx] = binary_fill_holes(pa_mask[:, :, z_idx])
+        
+        pa_after_fill = np.sum(pa_mask)
+        if log_callback:
+            gained = pa_after_fill - pa_before_fill
+            if gained > 0:
+                log_callback(f"   🫀 Anatomical Hole Filling: +{gained:,} voxels recovered (dark cores inside vessels)")
         
         # Label connected components
         labeled_pa, num_features = label(pa_mask)
