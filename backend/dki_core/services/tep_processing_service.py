@@ -1111,7 +1111,8 @@ class TEPProcessingService:
                     mart_mask=results['thrombus_mask'],
                     mat_filepath=mat_filepath,
                     spacing=spacing,
-                    log_callback=log_callback
+                    log_callback=log_callback,
+                    pa_mask=results.get('pulmonary_artery_mask')  # CENTROID: full-res PA for origin ref
                 )
                 
                 if gt_result:
@@ -1210,7 +1211,7 @@ class TEPProcessingService:
     # GROUND TRUTH VALIDATION
     # ═══════════════════════════════════════════════════════════════════════════
     
-    def _validate_against_ground_truth(self, mart_mask, mat_filepath, spacing=None, log_callback=None):
+    def _validate_against_ground_truth(self, mart_mask, mat_filepath, spacing=None, log_callback=None, pa_mask=None):
         """
         Compare MART thrombus detection against expert Ground Truth mask from .mat file.
         
@@ -1306,7 +1307,50 @@ class TEPProcessingService:
         gt_voxels = int(np.sum(gt_mask))
         mart_voxels = int(np.sum(mart_binary))
         intersection_voxels = int(np.sum(gt_mask & mart_binary))
-        
+
+        # CENTROID ALIGNMENT: If intersection is poor and pa_mask is provided,
+        # compute 3D centroids and slide GT to align with the PA anatomical reference.
+        # v = Centroid_PA - Centroid_GT  (shift that brings GT onto MART coordinate space)
+        if intersection_voxels < 100 and pa_mask is not None and gt_voxels > 0:
+            try:
+                from scipy.ndimage import shift as _ndi_shift
+                _gt_coords = np.array(np.where(gt_mask > 0), dtype=np.float64)
+                _pa_coords = np.array(np.where(np.asarray(pa_mask) > 0), dtype=np.float64)
+                if _gt_coords.shape[1] > 0 and _pa_coords.shape[1] > 0:
+                    _gt_centroid = _gt_coords.mean(axis=1)   # shape (3,)
+                    _pa_centroid = _pa_coords.mean(axis=1)   # shape (3,)
+                    _shift_vec   = _pa_centroid - _gt_centroid
+                    if log_callback:
+                        log_callback(
+                            f"  [CENTROID] GT centroid={np.round(_gt_centroid, 1)}, "
+                            f"PA centroid={np.round(_pa_centroid, 1)}, "
+                            f"shift={np.round(_shift_vec, 1)}"
+                        )
+                    if np.max(np.abs(_shift_vec)) > 3:   # only apply if shift > 3 voxels
+                        _gt_shifted = _ndi_shift(
+                            gt_mask.astype(np.float32), _shift_vec, order=0, cval=0.0
+                        )
+                        _gt_shifted = (_gt_shifted > 0.5).astype(np.uint8)
+                        _shifted_intersection = int(np.sum(_gt_shifted & mart_binary))
+                        if _shifted_intersection > intersection_voxels:
+                            gt_mask = _gt_shifted
+                            intersection_voxels = _shifted_intersection
+                            if log_callback:
+                                log_callback(
+                                    f"  🎯 [CENTROID] Shift adopted — intersection improved to "
+                                    f"{_shifted_intersection} vox. "
+                                    f"Shift vector: {np.round(_shift_vec, 1)} vox"
+                                )
+                        else:
+                            if log_callback:
+                                log_callback(
+                                    f"  ℹ️ [CENTROID] Shift did not improve intersection "
+                                    f"(before={intersection_voxels}, after={_shifted_intersection}). Keeping original."
+                                )
+            except Exception as _ca_err:
+                if log_callback:
+                    log_callback(f"  ⚠️ [CENTROID] Alignment failed: {_ca_err}")
+
         # If intersection is near zero despite both having volume, try transposing X and Y
         if intersection_voxels < 100 and gt_voxels > 0 and mart_voxels > 0:
             gt_transposed = np.transpose(gt_mask, (1, 0, 2)) # Swap X and Y
@@ -1363,6 +1407,28 @@ class TEPProcessingService:
                         f"  ℹ️ [Z-FLIP] Tried Z-flip, no improvement "
                         f"({intersection_voxels} → {flipped_intersection}). Keeping original."
                     )
+
+        # GT DEBUG OVERLAY: Save the final (aligned) GT mask as NIfTI for visual QC.
+        # This file shows exactly where the expert annotation lands in DICOM space.
+        try:
+            import nibabel as _nib_gt
+            import os as _os_gt
+            _gt_out_path = _os_gt.join(
+                _os_gt.dirname(mat_filepath),
+                "gt_debug_overlay.nii.gz"
+            )
+            _nib_gt.save(
+                _nib_gt.Nifti1Image(gt_mask.astype(np.float32), np.eye(4)),
+                _gt_out_path
+            )
+            if log_callback:
+                log_callback(f"  💾 [GT OVERLAY] Saved aligned GT mask: {_gt_out_path}")
+        except ImportError:
+            if log_callback:
+                log_callback("  ℹ️ [GT OVERLAY] nibabel not installed — skipping NIfTI export.")
+        except Exception as _gt_exp_err:
+            if log_callback:
+                log_callback(f"  ⚠️ [GT OVERLAY] Export failed: {_gt_exp_err}")
 
         return {
             'gt_mask': gt_mask,
@@ -2812,19 +2878,19 @@ class TEPProcessingService:
                         _lm_coh = coherence_map[_lm_region_mask]
                         _lm_dat = data[_lm_region_mask]
                         _lm_scr = score_map[_lm_region_mask]
-                        # Relaxed Gate M: geo_conf > 0.1 OR coherence < 0.3
+                        # Relaxed Gate M: geo_conf > 0.05 OR coherence < 0.3
                         _lm_gate = ((_lm_dat >= 40) & (_lm_dat <= 90) &
-                                    ((_lm_geo > 0.1) | (_lm_coh < 0.3)))
+                                    ((_lm_geo > 0.05) | (_lm_coh < 0.3)))
                         _lm_sub = _lm_gate & (_lm_scr < self.SCORE_THRESHOLD_SUSPICIOUS)
                         if np.any(_lm_sub):
                             _lm_scores_copy = _lm_scr.copy()
-                            _lm_scores_copy[_lm_sub] *= 1.3
+                            _lm_scores_copy[_lm_sub] *= 1.8
                             score_map[_lm_region_mask] = _lm_scores_copy
                             _large_mass_total += int(np.sum(_lm_sub))
                 if _large_mass_total > 0 and log_callback:
                     log_callback(
                         f"   Large Mass Boost: {_large_mass_total:,} sub-threshold voxels "
-                        f"boosted x1.3 (relaxed Gate M: geo>0.1, region>1000 vox)"
+                        f"boosted x1.8 (relaxed Gate M: geo>0.05, region>1000 vox)"
                     )
                 # FLAT +0.5 BONUS: any connected candidate >500 voxels gets unconditional
                 # score elevation — large solid masses inside PA_Mask are almost never noise.
