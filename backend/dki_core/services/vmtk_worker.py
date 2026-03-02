@@ -105,6 +105,16 @@ def smooth_surface(surface, iterations=30, passband=0.1):
     return smoother.GetOutput()
 
 
+def decimate_surface(surface, target_reduction=0.90):
+    """Quadric decimation — reduces polygon count while preserving shape."""
+    import vtk
+    decimator = vtk.vtkQuadricDecimation()
+    decimator.SetInputData(surface)
+    decimator.SetTargetReduction(target_reduction)  # 0.90 = keep 10%
+    decimator.Update()
+    return decimator.GetOutput()
+
+
 def keep_largest_component(surface):
     """Keep only the largest connected component of the surface."""
     import vtk
@@ -310,6 +320,61 @@ def detect_truncated_branches(centerlines_pd, mask, spacing, min_pa_voxels=50):
 # Segment mode — VMTK Level Set Segmentation from raw CT
 # ---------------------------------------------------------------------------
 
+def _gradient_region_growing(ct_data, seed_zyx, spacing):
+    """
+    Gradient-constrained region growing — pure numpy/scipy fallback.
+
+    Grows from the seed voxel into neighbouring voxels where the image gradient
+    is low (vessel interior / thrombus), stopping at vessel walls (high gradient).
+    No VMTK dependency.
+
+    Returns uint8 mask with same shape as ct_data.
+    """
+    from scipy.ndimage import gaussian_filter, binary_dilation, generate_binary_structure, label as ndlabel
+
+    print("[VMTK-SEG][FALLBACK] Running gradient-constrained region growing...", flush=True)
+
+    # Smooth CT and compute gradient magnitude
+    smooth = gaussian_filter(ct_data, sigma=1.0)
+    gz, gy, gx = np.gradient(smooth, spacing[0], spacing[1], spacing[2])
+    grad_mag = np.sqrt(gz**2 + gy**2 + gx**2)
+
+    # Adaptive sigmoid speed: high inside vessel, low at walls
+    p90 = np.percentile(grad_mag[grad_mag > 0], 90) + 1e-6
+    speed = np.exp(-(grad_mag / p90) ** 2 / 0.5)
+
+    # Initialize 5-voxel cube around seed
+    mask = np.zeros(ct_data.shape, dtype=bool)
+    sz, sy, sx = seed_zyx
+    nz, ny, nx = ct_data.shape
+    mask[max(0, sz - 2):min(nz, sz + 3),
+         max(0, sy - 2):min(ny, sy + 3),
+         max(0, sx - 2):min(nx, sx + 3)] = True
+
+    # Iterative dilation — only expand where gradient speed > threshold
+    struct = generate_binary_structure(3, 1)  # 6-connectivity
+    speed_thr = 0.30
+    for i in range(300):
+        expanded = binary_dilation(mask, struct)
+        new_voxels = expanded & ~mask & (speed > speed_thr)
+        if not new_voxels.any():
+            break
+        mask |= new_voxels
+
+    # Cleanup: keep only components ≥ 20 voxels
+    out = mask.astype(np.uint8)
+    labeled, n_comp = ndlabel(out)
+    if n_comp > 0:
+        sizes = np.bincount(labeled.ravel())
+        sizes[0] = 0
+        keep = sizes >= 20
+        out = keep[labeled].astype(np.uint8)
+
+    print(f"[VMTK-SEG][FALLBACK] Region growing: {out.sum():,} voxels, "
+          f"{i + 1} iterations", flush=True)
+    return out
+
+
 def segment_mode(args):
     """
     Level-set segmentation of the pulmonary artery tree from a raw CT HU volume.
@@ -317,6 +382,13 @@ def segment_mode(args):
     The stopping function is the vessel WALL (gradient magnitude), not internal
     HU brightness.  This allows the growing surface to "swallow" dark thrombus
     regions (60-80 HU) that would be missed by a pure HU threshold.
+
+    Pipeline (3-step, fully headless):
+      1. vmtkImageInitialization  — fast-marching signed-distance from seed (Interactive=0)
+      2. vmtkLevelSetSegmentation — geodesic active contour with pre-computed init
+      3. Threshold ≤ 0 → binary PA mask
+
+    If VMTK fails, falls back to gradient-constrained region growing (pure scipy).
 
     Inputs:
         args.input   — NIfTI (float32 HU), shape (z, y, x)
@@ -328,9 +400,6 @@ def segment_mode(args):
         metadata.json   — {ok, mode, n_voxels, seed_mm, seed_vox}
     """
     import nibabel as nib
-    import vtk
-    from vtk.util import numpy_support
-    from vmtk import vmtkscripts
 
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
@@ -352,61 +421,42 @@ def segment_mode(args):
 
         # 2. Parse seed (x_vox, y_vox, z_vox) --------------------------------
         seed_vox = [int(v) for v in args.seed.split(",")]   # [x_vox, y_vox, z_vox]
-        # Convert to mm: x_mm = x_vox * sx (spacing[2]), y_mm *= sy, z_mm *= sz
         seed_mm = [
-            seed_vox[0] * spacing[2],   # x
-            seed_vox[1] * spacing[1],   # y
-            seed_vox[2] * spacing[0],   # z
+            seed_vox[0] * spacing[2],   # x_mm
+            seed_vox[1] * spacing[1],   # y_mm
+            seed_vox[2] * spacing[0],   # z_mm
         ]
+        # Seed in (z,y,x) order for numpy indexing
+        seed_zyx = (seed_vox[2], seed_vox[1], seed_vox[0])
         print(f"[VMTK-SEG] Seed: voxel={seed_vox}, mm={seed_mm}", flush=True)
 
-        # 3. Convert numpy (z,y,x) → vtkImageData (x,y,z) -------------------
-        # VTK stores scalars in Fortran (x-fastest) order, numpy array is (z,y,x).
-        vtk_image = vtk.vtkImageData()
-        vtk_image.SetDimensions(nx, ny, nz)
-        vtk_image.SetSpacing(spacing[2], spacing[1], spacing[0])   # (sx, sy, sz)
-        vtk_image.SetOrigin(0.0, 0.0, 0.0)
-        # Transpose to (x,y,z) then flatten in Fortran order for VTK
-        flat = np.asfortranarray(ct_data.T).ravel(order="F").astype(np.float32)
-        vtk_arr = numpy_support.numpy_to_vtk(flat, deep=True, array_type=vtk.VTK_FLOAT)
-        vtk_arr.SetName("HounsfieldUnits")
-        vtk_image.GetPointData().SetScalars(vtk_arr)
+        # 3. Try VMTK level-set pipeline (may fail on some envs) -------------
+        pa_mask = None
+        try:
+            pa_mask = _vmtk_levelset(ct_data, seed_mm, spacing, nx, ny, nz)
+        except Exception as vmtk_err:
+            print(f"[VMTK-SEG][WARN] VMTK level-set failed: {vmtk_err}", flush=True)
+            print(traceback.format_exc(), flush=True)
 
-        # 4. Create seed VTK PolyData ----------------------------------------
-        seed_points = vtk.vtkPoints()
-        seed_points.InsertNextPoint(seed_mm[0], seed_mm[1], seed_mm[2])
-        seed_polydata = vtk.vtkPolyData()
-        seed_polydata.SetPoints(seed_points)
+        # 4. Fallback: gradient-constrained region growing -------------------
+        if pa_mask is None or pa_mask.sum() < 500:
+            print("[VMTK-SEG] VMTK level-set unavailable or empty — using fallback.",
+                  flush=True)
+            pa_mask = _gradient_region_growing(ct_data, seed_zyx, spacing)
+            meta["mode"] = "gradient_region_growing"
 
-        # 5. VMTK Level Set Segmentation ------------------------------------
-        print(f"[VMTK-SEG] Running level-set segmentation (500 iter)...", flush=True)
-        lseg = vmtkscripts.vmtkLevelSetSegmentation()
-        lseg.Image = vtk_image
-        lseg.Seeds = seed_polydata
-        lseg.NumberOfIterations = 500
-        lseg.PropagationScaling = 1.0
-        lseg.CurvatureScaling = 0.5
-        lseg.AdvectionScaling = 1.0
-        lseg.Execute()
-
-        # 6. Threshold: inside vessel = level set ≤ 0 -----------------------
-        ls_scalars = lseg.LevelSets.GetPointData().GetScalars()
-        ls_array = numpy_support.vtk_to_numpy(ls_scalars)
-        # Reshape back to (z, y, x): VTK stored in Fortran (x,y,z) order
-        ls_3d = ls_array.reshape((nx, ny, nz), order="F").T   # → (z, y, x)
-        pa_mask = (ls_3d <= 0).astype(np.uint8)
-
-        # 7. Basic cleanup — remove tiny isolated fragments ------------------
+        # 5. Cleanup — remove tiny fragments ---------------------------------
         from scipy.ndimage import label as ndlabel
         labeled, n_comp = ndlabel(pa_mask)
         if n_comp > 0:
             sizes = np.bincount(labeled.ravel())
             sizes[0] = 0
-            keep = sizes >= 20   # min 20 voxels per component
+            keep = sizes >= 20
             pa_mask = keep[labeled].astype(np.uint8)
-        print(f"[VMTK-SEG] PA mask: {pa_mask.sum():,} voxels from {n_comp} components", flush=True)
+        print(f"[VMTK-SEG] Final PA mask: {pa_mask.sum():,} voxels "
+              f"({n_comp} components)", flush=True)
 
-        # 8. Save outputs ---------------------------------------------------
+        # 6. Save outputs ---------------------------------------------------
         affine = np.diag([spacing[0], spacing[1], spacing[2], 1.0])
         mask_path = os.path.join(output_dir, "pa_mask.nii.gz")
         nib.save(nib.Nifti1Image(pa_mask, affine), mask_path)
@@ -426,8 +476,70 @@ def segment_mode(args):
 
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
-    print(f"[VMTK-SEG] Done. ok={meta['ok']}", flush=True)
+    print(f"[VMTK-SEG] Done. ok={meta['ok']}, mode={meta['mode']}", flush=True)
     return 0 if meta["ok"] else 1
+
+
+def _vmtk_levelset(ct_data, seed_mm, spacing, nx, ny, nz):
+    """
+    Run VMTK 3-step headless level-set pipeline.
+
+    Returns uint8 PA mask or raises on failure.
+    """
+    import vtk
+    from vtk.util import numpy_support
+    from vmtk import vmtkscripts
+
+    # -- Build vtkImageData from numpy (z,y,x) → VTK (x,y,z) ---------------
+    vtk_image = vtk.vtkImageData()
+    vtk_image.SetDimensions(nx, ny, nz)
+    vtk_image.SetSpacing(spacing[2], spacing[1], spacing[0])   # (sx, sy, sz)
+    vtk_image.SetOrigin(0.0, 0.0, 0.0)
+    flat = np.asfortranarray(ct_data.T).ravel(order="F").astype(np.float32)
+    vtk_arr = numpy_support.numpy_to_vtk(flat, deep=True, array_type=vtk.VTK_FLOAT)
+    vtk_arr.SetName("HounsfieldUnits")
+    vtk_image.GetPointData().SetScalars(vtk_arr)
+    vtk_image.Modified()   # CRITICAL: tell VTK pipeline the data is ready
+
+    # -- Step A: Initialize level set from seed (non-interactive) -----------
+    # Fast-marching builds a signed-distance function from the seed point.
+    # Interactive=0 prevents the GUI renderer from launching.
+    print("[VMTK-SEG] Step A: Fast-marching initialization from seed...", flush=True)
+    initializer = vmtkscripts.vmtkImageInitialization()
+    initializer.Image = vtk_image
+    initializer.Method = "fastmarching"
+    initializer.SourcePoints = [seed_mm[0], seed_mm[1], seed_mm[2]]
+    initializer.Interactive = 0
+    initializer.Execute()
+
+    initial_ls = initializer.InitialLevelSets
+    if initial_ls is None:
+        raise RuntimeError("vmtkImageInitialization returned None for InitialLevelSets")
+
+    # -- Step B: Level set evolution ----------------------------------------
+    # With InitialLevelSets pre-set, vmtkLevelSetSegmentation skips the
+    # interactive initialization and goes straight to evolution.
+    # FeatureImage is computed automatically (gradient-based geodesic).
+    print("[VMTK-SEG] Step B: Geodesic level-set evolution (300 iter)...", flush=True)
+    lseg = vmtkscripts.vmtkLevelSetSegmentation()
+    lseg.Image = vtk_image
+    lseg.InitialLevelSets = initial_ls
+    lseg.NumberOfIterations = 300
+    lseg.PropagationScaling = 1.0
+    lseg.CurvatureScaling = 0.1       # low = less smoothing → grows into thrombus
+    lseg.AdvectionScaling = 1.0
+    lseg.Execute()
+
+    # -- Step C: Extract binary mask ----------------------------------------
+    ls_scalars = lseg.LevelSets.GetPointData().GetScalars()
+    if ls_scalars is None:
+        raise RuntimeError("LevelSets output has no scalars")
+    ls_array = numpy_support.vtk_to_numpy(ls_scalars)
+    ls_3d = ls_array.reshape((nx, ny, nz), order="F").T   # → (z, y, x)
+    pa_mask = (ls_3d <= 0).astype(np.uint8)
+
+    print(f"[VMTK-SEG] VMTK level-set complete: {pa_mask.sum():,} voxels", flush=True)
+    return pa_mask
 
 
 # ---------------------------------------------------------------------------
@@ -458,8 +570,13 @@ def mesh_mode(args):
         print("[VMTK] Smoothing surface (Laplacian, 30 iter)...", flush=True)
         smooth = smooth_surface(raw_surface, iterations=30, passband=0.1)
 
+        print("[VMTK] Decimating surface (90% reduction for web)...", flush=True)
+        decimated = decimate_surface(smooth, target_reduction=0.90)
+        print(f"[VMTK] Decimated: {decimated.GetNumberOfPoints()} pts, "
+              f"{decimated.GetNumberOfCells()} cells", flush=True)
+
         print("[VMTK] Extracting largest component...", flush=True)
-        largest = keep_largest_component(smooth)
+        largest = keep_largest_component(decimated)
 
         print("[VMTK] Computing surface normals...", flush=True)
         surface_with_normals = compute_normals(largest)
