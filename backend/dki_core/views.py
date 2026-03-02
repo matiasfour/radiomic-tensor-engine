@@ -781,6 +781,34 @@ class StudyViewSet(viewsets.ModelViewSet):
         # Save Source Volume for 3D Viewer (Niivue)
         result.source_volume.name = save_nifti(data, 'source', affine) # Use original 'data' volume
 
+        # Save lightweight 3D volumes (128³ downsampled) for WebGL performance
+        def save_nifti_3d(arr, name, affine_matrix, max_dim=128):
+            """Save a downsampled NIfTI for the 3D WebGL viewer (~1-2 MB vs ~400 MB)."""
+            from scipy.ndimage import zoom as scipy_zoom
+            shape = arr.shape
+            factor = min(1.0, max_dim / max(shape))
+            if factor < 1.0:
+                small = scipy_zoom(arr, factor, order=1)
+                scale = np.diag([1/factor, 1/factor, 1/factor, 1])
+                new_affine = affine_matrix @ scale
+            else:
+                small = arr
+                new_affine = affine_matrix
+            if name == 'source':
+                small = np.clip(small, -1024, 3071).astype(np.int16)
+            else:
+                small = small.astype(np.float32)
+            img = nib.Nifti1Image(small, new_affine)
+            filename = f"{name}_3d_{study.id}.nii.gz"
+            rel_path = os.path.join('results', f'tep_{name}_3d', filename)
+            full_dir = os.path.join(settings.MEDIA_ROOT, 'results', f'tep_{name}_3d')
+            os.makedirs(full_dir, exist_ok=True)
+            nib.save(img, os.path.join(full_dir, filename))
+            return rel_path
+
+        result.source_volume_3d.name = save_nifti_3d(data, 'source', affine)
+        result.tep_heatmap_3d.name = save_nifti_3d(results['tep_heatmap'], 'heatmap', affine)
+
         # ── VMTK Mesh Outputs (PA surface + thrombus 3D models) ──
         def save_mesh_file(src_path, mesh_subdir, filename):
             """Copy a mesh file produced by vmtk_worker into the media directory."""

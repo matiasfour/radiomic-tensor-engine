@@ -1035,6 +1035,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 					show3Dcrosshair: true,
 					backColor: [0, 0, 0, 1],
 					isResizeCanvas: true,
+					devicePixelRatio: 1, // prevent 4K scaling, saves 4x GPU memory
 				});
 
 				// Wrap in a microtask to ensure DOM is painted
@@ -1053,20 +1054,19 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 							return url;
 						};
 
-						// Load Volumes (moved inside success block)
+						// Load Volumes — prefer lightweight 3D versions (~1-2 MB vs ~400 MB)
 						const volumes = [];
 
 						// 1. Source Layer (Anatomical Reference)
-						// Prioritize NIfTI source volume (3D Viewer compatible)
-						if (results?.source_volume) {
+						const sourceUrl = results?.source_volume_3d || results?.source_volume;
+						if (sourceUrl) {
 							volumes.push({
-								url: toSafeUrl(results.source_volume),
+								url: toSafeUrl(sourceUrl),
 								opacity: 0.1,
 								colormap: "gray",
 								visible: true,
 							});
 						} else if (results?.tep_pa_mask) {
-							// Fallback to PA mask if no source volume (prevents crash on old studies)
 							volumes.push({
 								url: toSafeUrl(results.tep_pa_mask),
 								opacity: 0.1,
@@ -1076,9 +1076,10 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 						}
 
 						// 2. Heatmap Layer (Pathology)
-						if (results?.tep_heatmap) {
+						const heatmapUrl = results?.tep_heatmap_3d || results?.tep_heatmap;
+						if (heatmapUrl) {
 							volumes.push({
-								url: toSafeUrl(results.tep_heatmap),
+								url: toSafeUrl(heatmapUrl),
 								opacity: 1.0,
 								colormap: "red",
 								cal_min: 2,
@@ -1087,15 +1088,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 							});
 						}
 
-						// 3. ROI Layer (Validation)
-						if (results?.tep_roi_heatmap) {
-							volumes.push({
-								url: toSafeUrl(results.tep_roi_heatmap),
-								opacity: 0.3,
-								colormap: "cyan",
-								visible: true,
-							});
-						}
+						// ROI layer omitted from 3D — too heavy, low visual value in volume rendering
 
 						nv.loadVolumes(volumes);
 
