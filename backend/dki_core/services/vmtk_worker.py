@@ -491,11 +491,15 @@ def _vmtk_levelset(ct_data, seed_mm, spacing, nx, ny, nz):
     from vmtk import vmtkscripts
 
     # -- Build vtkImageData from numpy (z,y,x) → VTK (x,y,z) ---------------
+    # Clamp HU to vessel-relevant range: ignore air/parenchyma (< 0 HU)
+    # to prevent the level set from leaking into lung tissue.
+    ct_clamped = np.clip(ct_data, 0, 2000).astype(np.float32)
+
     vtk_image = vtk.vtkImageData()
-    vtk_image.SetDimensions(nx, ny, nz)
-    vtk_image.SetSpacing(spacing[2], spacing[1], spacing[0])   # (sx, sy, sz)
+    vtk_image.SetDimensions(int(nx), int(ny), int(nz))
+    vtk_image.SetSpacing(float(spacing[2]), float(spacing[1]), float(spacing[0]))
     vtk_image.SetOrigin(0.0, 0.0, 0.0)
-    flat = np.asfortranarray(ct_data.T).ravel(order="F").astype(np.float32)
+    flat = np.asfortranarray(ct_clamped.T).ravel(order="F").astype(np.float32)
     vtk_arr = numpy_support.numpy_to_vtk(flat, deep=True, array_type=vtk.VTK_FLOAT)
     vtk_arr.SetName("HounsfieldUnits")
     vtk_image.GetPointData().SetScalars(vtk_arr)
@@ -504,11 +508,15 @@ def _vmtk_levelset(ct_data, seed_mm, spacing, nx, ny, nz):
     # -- Step A: Initialize level set from seed (non-interactive) -----------
     # Fast-marching builds a signed-distance function from the seed point.
     # Interactive=0 prevents the GUI renderer from launching.
-    print("[VMTK-SEG] Step A: Fast-marching initialization from seed...", flush=True)
+    # CRITICAL: cast seed_mm to float() explicitly — VTK's ComputePointId
+    # crashes with numpy floats (TypeError: integer argument expected, got float).
+    seed_mm_float = [float(seed_mm[0]), float(seed_mm[1]), float(seed_mm[2])]
+    print(f"[VMTK-SEG] Step A: Fast-marching initialization from seed {seed_mm_float}...",
+          flush=True)
     initializer = vmtkscripts.vmtkImageInitialization()
     initializer.Image = vtk_image
     initializer.Method = "fastmarching"
-    initializer.SourcePoints = [seed_mm[0], seed_mm[1], seed_mm[2]]
+    initializer.SourcePoints = seed_mm_float
     initializer.Interactive = 0
     initializer.Execute()
 
@@ -520,13 +528,15 @@ def _vmtk_levelset(ct_data, seed_mm, spacing, nx, ny, nz):
     # With InitialLevelSets pre-set, vmtkLevelSetSegmentation skips the
     # interactive initialization and goes straight to evolution.
     # FeatureImage is computed automatically (gradient-based geodesic).
+    # PropagationScaling=0.5 + CurvatureScaling=0.8 → stays tubular,
+    # penetrates thrombus but resists leaking into parenchyma.
     print("[VMTK-SEG] Step B: Geodesic level-set evolution (300 iter)...", flush=True)
     lseg = vmtkscripts.vmtkLevelSetSegmentation()
     lseg.Image = vtk_image
     lseg.InitialLevelSets = initial_ls
     lseg.NumberOfIterations = 300
-    lseg.PropagationScaling = 1.0
-    lseg.CurvatureScaling = 0.1       # low = less smoothing → grows into thrombus
+    lseg.PropagationScaling = 0.5     # conservative growth
+    lseg.CurvatureScaling = 0.8      # high = prefers smooth/tubular shape
     lseg.AdvectionScaling = 1.0
     lseg.Execute()
 
@@ -535,7 +545,7 @@ def _vmtk_levelset(ct_data, seed_mm, spacing, nx, ny, nz):
     if ls_scalars is None:
         raise RuntimeError("LevelSets output has no scalars")
     ls_array = numpy_support.vtk_to_numpy(ls_scalars)
-    ls_3d = ls_array.reshape((nx, ny, nz), order="F").T   # → (z, y, x)
+    ls_3d = ls_array.reshape((int(nx), int(ny), int(nz)), order="F").T  # → (z, y, x)
     pa_mask = (ls_3d <= 0).astype(np.uint8)
 
     print(f"[VMTK-SEG] VMTK level-set complete: {pa_mask.sum():,} voxels", flush=True)

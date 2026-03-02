@@ -267,6 +267,8 @@ export interface ProcessingResult {
 	primary_intervention_target?: string;
 	
 	source_volume?: string;
+	source_volume_3d?: string | null;
+	tep_heatmap_3d?: string | null;
 
 	// UX Metadata (Diagnostic Station)
 	slices_meta?: SlicesMeta;

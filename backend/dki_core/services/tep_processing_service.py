@@ -507,7 +507,23 @@ class TEPProcessingService:
                          working_data, seed, spacing, log_callback=log_callback
                      )
                      if pa_mask_vmtk is not None and pa_mask_vmtk.sum() > 1000:
-                         pa_mask = pa_mask_vmtk
+                         # Post-VMTK cleanup: light erosion + largest component
+                         # to remove any parenchyma leak from the level-set.
+                         from scipy.ndimage import binary_erosion, label as ndlabel
+                         pa_clean = binary_erosion(pa_mask_vmtk, iterations=1)
+                         labeled, n_cc = ndlabel(pa_clean)
+                         if n_cc > 0:
+                             sizes = np.bincount(labeled.ravel())
+                             sizes[0] = 0
+                             pa_clean = (labeled == np.argmax(sizes)).astype(bool)
+                         # Re-dilate to recover original boundary
+                         from scipy.ndimage import binary_dilation
+                         pa_mask = binary_dilation(pa_clean, iterations=1).astype(bool)
+                         if log_callback:
+                             log_callback(
+                                 f"   [VMTK] Post-cleanup: {int(pa_mask_vmtk.sum()):,} → "
+                                 f"{int(pa_mask.sum()):,} vx (erosion+largest CC+dilation)"
+                             )
                          pa_info = {
                              'method': 'VMTK_LEVELSET',
                              'seed_voxel': seed,

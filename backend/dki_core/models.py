@@ -119,6 +119,10 @@ class ProcessingResult(models.Model):
 
     # 3D Viewer Compatibility
     source_volume = models.FileField(upload_to='results/source_volume/', blank=True, null=True, help_text="Original volume converted to NIfTI for 3D viewer")
+    source_volume_3d = models.FileField(upload_to='results/tep_source_3d/', blank=True, null=True,
+                                         help_text="Downsampled source volume for 3D WebGL viewer (128³ int16)")
+    tep_heatmap_3d = models.FileField(upload_to='results/tep_heatmap_3d/', blank=True, null=True,
+                                       help_text="Downsampled heatmap for 3D WebGL viewer (128³ float32)")
 
     # VMTK 3D Mesh Outputs (surface meshes for interactive 3D viewer)
     pa_mesh = models.FileField(upload_to='results/meshes/pa/', blank=True, null=True,
