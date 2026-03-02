@@ -47,7 +47,8 @@ if [ -d "/teamspace/studios/this_studio" ]; then
         echo "✅ VMTK ya disponible en el entorno activo."
     else
         echo "🔬 Instalando VMTK en el entorno activo (primera vez, ~5-10 min)..."
-        conda install -c vmtk vmtk -y
+        PYVER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+        conda install -c vmtk -c conda-forge vmtk "python=${PYVER}" -y
         if python3 -c "import vmtk; import vtk" 2>/dev/null; then
             echo "✅ VMTK instalado correctamente."
         else
