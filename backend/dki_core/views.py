@@ -806,6 +806,15 @@ class StudyViewSet(viewsets.ModelViewSet):
                     level=0.5,
                     spacing=spacing_mm,
                 )
+                # Decimate if mesh is too heavy for WebGL (>50K faces)
+                if len(faces) > 50000:
+                    step = max(1, len(faces) // 50000)
+                    faces = faces[::step]
+                    used = np.unique(faces)
+                    remap = np.full(len(verts), -1, dtype=int)
+                    remap[used] = np.arange(len(used))
+                    verts = verts[used]
+                    faces = remap[faces]
                 mesh_dir = os.path.join(settings.MEDIA_ROOT, 'results', 'meshes', 'thrombus')
                 os.makedirs(mesh_dir, exist_ok=True)
                 obj_name = f"thrombus_{study_uuid}.obj"
