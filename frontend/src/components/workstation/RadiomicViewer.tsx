@@ -1035,7 +1035,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 					show3Dcrosshair: true,
 					backColor: [0, 0, 0, 1],
 					isResizeCanvas: true,
-					devicePixelRatio: 1, // prevent 4K scaling, saves 4x GPU memory
+					forceDevicePixelRatio: 1, // prevent 4K scaling, saves 4x GPU memory
 				});
 
 				// Wrap in a microtask to ensure DOM is painted
