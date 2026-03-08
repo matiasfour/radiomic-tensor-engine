@@ -524,17 +524,26 @@ class TEPProcessingService:
                                  f"   [VMTK] Post-cleanup: {int(pa_mask_vmtk.sum()):,} → "
                                  f"{int(pa_mask.sum()):,} vx (erosion+largest CC+dilation)"
                              )
-                         pa_info = {
-                             'method': 'VMTK_LEVELSET',
-                             'seed_voxel': seed,
-                             'total_voxels': int(pa_mask.sum()),
-                         }
-                         vmtk_seg_success = True
-                         if log_callback:
-                             log_callback(
-                                 f"   ✅ [VMTK] Level-set PA mask accepted: "
-                                 f"{pa_mask.sum():,} vx — dark thrombus core included"
-                             )
+                         # Voxel cap: reject catastrophic leaks (>2M voxels)
+                         MAX_PA_VOXELS = 2_000_000
+                         if pa_mask.sum() > MAX_PA_VOXELS:
+                             if log_callback:
+                                 log_callback(
+                                     f"   ⚠️ [VMTK] PA mask too large "
+                                     f"({int(pa_mask.sum()):,} vx > {MAX_PA_VOXELS:,}) — rejecting, HU fallback"
+                                 )
+                         else:
+                             pa_info = {
+                                 'method': 'VMTK_LEVELSET',
+                                 'seed_voxel': seed,
+                                 'total_voxels': int(pa_mask.sum()),
+                             }
+                             vmtk_seg_success = True
+                             if log_callback:
+                                 log_callback(
+                                     f"   ✅ [VMTK] Level-set PA mask accepted: "
+                                     f"{pa_mask.sum():,} vx — dark thrombus core included"
+                                 )
                      else:
                          if log_callback:
                              log_callback(
@@ -1117,6 +1126,7 @@ class TEPProcessingService:
 
             # VMTK geometric outputs (file paths for mesh serving)
             'vmtk_surface_obj': vmtk_result.get('surface_obj') if vmtk_result and vmtk_result.get('ok') else None,
+            'vmtk_surface_mz3': vmtk_result.get('surface_mz3') if vmtk_result and vmtk_result.get('ok') else None,
             'vmtk_centerlines_vtp': vmtk_result.get('centerlines_vtp') if vmtk_result and vmtk_result.get('ok') else None,
             'vmtk_truncated_branches': vmtk_result.get('truncated_branches', []) if vmtk_result else [],
         }
@@ -4028,6 +4038,7 @@ class TEPProcessingService:
                 }
 
                 for key, filename in [('surface_obj', 'pa_surface.obj'),
+                                      ('surface_mz3', 'pa_surface.mz3'),
                                       ('centerlines_vtp', 'centerlines.vtp')]:
                     src = os.path.join(out_dir, filename)
                     if os.path.exists(src):

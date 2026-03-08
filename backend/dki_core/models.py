@@ -126,9 +126,9 @@ class ProcessingResult(models.Model):
 
     # VMTK 3D Mesh Outputs (surface meshes for interactive 3D viewer)
     pa_mesh = models.FileField(upload_to='results/meshes/pa/', blank=True, null=True,
-                               help_text="VMTK smooth PA surface mesh (.obj) for Niivue 3D viewer")
+                               help_text="VMTK smooth PA surface mesh (.mz3 binary) for Niivue 3D viewer")
     thrombus_mesh = models.FileField(upload_to='results/meshes/thrombus/', blank=True, null=True,
-                                     help_text="Thrombus 3D mesh (.obj) rendered as solid red overlay in 3D viewer")
+                                     help_text="Thrombus 3D mesh (.mz3 binary) rendered as solid red overlay in 3D viewer")
     centerline_vtp = models.FileField(upload_to='results/meshes/centerline/', blank=True, null=True,
                                       help_text="VMTK centerlines with MaximumInscribedSphereRadius attribute (.vtp)")
     

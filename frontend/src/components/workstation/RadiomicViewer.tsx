@@ -147,6 +147,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 	const nvCanvasRef = useRef<HTMLCanvasElement>(null);
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const [niivueInstance, setNiivueInstance] = useState<any>(null);
+	const [loading3d, setLoading3d] = useState(false);
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const [studyData, setStudyData] = useState<any>(null);
 
@@ -1031,6 +1032,7 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 			}
 
 			try {
+				setLoading3d(true);
 				const nv = new Niivue({
 					show3Dcrosshair: true,
 					backColor: [0, 0, 0, 1],
@@ -1114,12 +1116,17 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 							} as never);
 						}
 						if (meshes.length > 0) {
-							nv.loadMeshes(meshes).catch((e: unknown) => {
-								console.warn("[VMTK] Mesh load failed:", e);
-							});
+							nv.loadMeshes(meshes)
+								.catch((e: unknown) => {
+									console.warn("[VMTK] Mesh load failed:", e);
+								})
+								.finally(() => setLoading3d(false));
+						} else {
+							setLoading3d(false);
 						}
 					} catch (e) {
 						console.error("Niivue attach failed:", e);
+						setLoading3d(false);
 					}
 				}, 100);
 			} catch (e) {
@@ -1127,11 +1134,19 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 			}
 		}
 
-		// Cleanup when leaving 3D tab
+		// Cleanup when leaving 3D tab — release WebGL context to free GPU memory
 		if (viewerState.activeMap !== "render3d" && niivueInstance) {
-			// Detach or destroy if possible, for now just nullify ref to force re-init
-			// Ideally niivue has a teardown, but we'll let React handle unmounting the canvas
+			try {
+				const gl = niivueInstance.gl as WebGL2RenderingContext;
+				if (gl) {
+					const ext = gl.getExtension('WEBGL_lose_context');
+					if (ext) ext.loseContext();
+				}
+			} catch (e) {
+				console.warn("[3D] GL cleanup:", e);
+			}
 			setNiivueInstance(null);
+			setLoading3d(false);
 		}
 
 	}, [viewerState.activeMap, studyData, results, niivueInstance]);
@@ -1823,8 +1838,27 @@ export const RadiomicViewer: React.FC<RadiomicViewerProps> = ({
 
 			{/* 3D Render View */}
 			{viewerState.activeMap === "render3d" ? (
-				<div className="viewer-container" style={{ padding: 0 }}>
+				<div className="viewer-container" style={{ padding: 0, position: "relative" }}>
 					<canvas ref={nvCanvasRef} style={{ width: "100%", height: "100%" }} />
+					{loading3d && (
+						<div style={{
+							position: "absolute", inset: 0,
+							display: "flex", alignItems: "center", justifyContent: "center",
+							background: "rgba(0,0,0,0.6)", zIndex: 10,
+						}}>
+							<style>{`@keyframes nv-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+							<div style={{ color: "white", textAlign: "center" }}>
+								<div style={{
+									border: "4px solid rgba(255,255,255,0.3)",
+									borderTop: "4px solid #fff",
+									borderRadius: "50%", width: 40, height: 40,
+									animation: "nv-spin 1s linear infinite",
+									margin: "0 auto 12px",
+								}} />
+								Cargando modelo 3D...
+							</div>
+						</div>
+					)}
 					<div
 						style={{
 							position: "absolute",
