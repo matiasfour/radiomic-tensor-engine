@@ -154,6 +154,28 @@ def save_surface_obj(surface, path):
     writer.Write()
 
 
+def save_surface_mz3(surface, path):
+    """Save VTK PolyData as .mz3 binary (Niivue native). ~40x smaller than OBJ."""
+    import struct
+    from vtk.util import numpy_support
+
+    vtk_points = surface.GetPoints()
+    nvert = vtk_points.GetNumberOfPoints()
+    verts = numpy_support.vtk_to_numpy(vtk_points.GetData()).astype(np.float32)
+
+    polys = surface.GetPolys()
+    poly_data = numpy_support.vtk_to_numpy(polys.GetData())
+    nface = polys.GetNumberOfCells()
+    # VTK stores [3, v0, v1, v2, 3, v0, v1, v2, ...] — strip the count prefix
+    faces = poly_data.reshape(-1, 4)[:, 1:4].astype(np.int32)
+
+    with open(path, 'wb') as f:
+        # MZ3 header: magic(2) + attr(2) + nface(4) + nvert(4) + nskip(4)
+        f.write(struct.pack('<HH III', 0x4D5A, 3, nface, nvert, 0))
+        f.write(faces.tobytes())
+        f.write(verts.tobytes())
+
+
 def extract_centerlines_vmtk(surface):
     """
     Extract centerlines using VMTK's network extraction (no manual seeds needed).
@@ -585,6 +607,15 @@ def mesh_mode(args):
         print(f"[VMTK] Decimated: {decimated.GetNumberOfPoints()} pts, "
               f"{decimated.GetNumberOfCells()} cells", flush=True)
 
+        # Hard polygon cap — prevent catastrophic meshes from crashing the browser
+        MAX_FACES_WEB = 30_000
+        if decimated.GetNumberOfCells() > MAX_FACES_WEB:
+            extra_reduction = 1.0 - (MAX_FACES_WEB / decimated.GetNumberOfCells())
+            print(f"[VMTK] Hard cap: {decimated.GetNumberOfCells()} > {MAX_FACES_WEB}, "
+                  f"extra decimation {extra_reduction:.1%}...", flush=True)
+            decimated = decimate_surface(decimated, target_reduction=extra_reduction)
+            print(f"[VMTK] After cap: {decimated.GetNumberOfCells()} cells", flush=True)
+
         print("[VMTK] Extracting largest component...", flush=True)
         largest = keep_largest_component(decimated)
 
@@ -596,9 +627,11 @@ def mesh_mode(args):
         # -- Save surface files --
         vtp_path = os.path.join(args.output_dir, "pa_surface.vtp")
         obj_path = os.path.join(args.output_dir, "pa_surface.obj")
+        mz3_path = os.path.join(args.output_dir, "pa_surface.mz3")
         save_surface_vtp(surface_with_normals, vtp_path)
         save_surface_obj(surface_with_normals, obj_path)
-        print(f"[VMTK] Surface saved: {obj_path}", flush=True)
+        save_surface_mz3(surface_with_normals, mz3_path)
+        print(f"[VMTK] Surface saved: {mz3_path} (MZ3 binary)", flush=True)
 
         # -- Centerline extraction --
         print("[VMTK] Extracting centerlines...", flush=True)
@@ -650,6 +683,7 @@ def mesh_mode(args):
         meta["ok"] = True
         meta["surface_obj"] = obj_path
         meta["surface_vtp"] = vtp_path
+        meta["surface_mz3"] = mz3_path
         meta["centerlines_vtp"] = cl_path if 'cl_path' in dir() else ""
         meta["radius_npz"] = npz_path
 

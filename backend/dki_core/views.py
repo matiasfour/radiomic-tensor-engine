@@ -819,9 +819,18 @@ class StudyViewSet(viewsets.ModelViewSet):
             shutil.copy2(src_path, dst)
             return os.path.join('results', 'meshes', mesh_subdir, filename)
 
-        def generate_thrombus_obj(thrombus_arr, spacing_mm, study_uuid):
+        def write_mz3(filepath, vertices, faces):
+            """Write mesh in MZ3 binary format (Niivue native). ~40x smaller than OBJ."""
+            import struct
+            nvert, nface = len(vertices), len(faces)
+            with open(filepath, 'wb') as f:
+                f.write(struct.pack('<HH III', 0x4D5A, 3, nface, nvert, 0))
+                f.write(faces.astype(np.int32).tobytes())
+                f.write(vertices.astype(np.float32).tobytes())
+
+        def generate_thrombus_mz3(thrombus_arr, spacing_mm, study_uuid):
             """
-            Generate an OBJ mesh from the thrombus binary mask using
+            Generate an MZ3 binary mesh from the thrombus binary mask using
             skimage Marching Cubes. Returns the saved file path relative to MEDIA_ROOT,
             or None if the mask is empty.
             """
@@ -834,9 +843,9 @@ class StudyViewSet(viewsets.ModelViewSet):
                     level=0.5,
                     spacing=spacing_mm,
                 )
-                # Decimate if mesh is too heavy for WebGL (>50K faces)
-                if len(faces) > 50000:
-                    step = max(1, len(faces) // 50000)
+                # Decimate if mesh is too heavy for WebGL (>30K faces)
+                if len(faces) > 30000:
+                    step = max(1, len(faces) // 30000)
                     faces = faces[::step]
                     used = np.unique(faces)
                     remap = np.full(len(verts), -1, dtype=int)
@@ -845,26 +854,33 @@ class StudyViewSet(viewsets.ModelViewSet):
                     faces = remap[faces]
                 mesh_dir = os.path.join(settings.MEDIA_ROOT, 'results', 'meshes', 'thrombus')
                 os.makedirs(mesh_dir, exist_ok=True)
-                obj_name = f"thrombus_{study_uuid}.obj"
-                obj_path = os.path.join(mesh_dir, obj_name)
-                with open(obj_path, 'w') as fobj:
-                    for v in verts:
-                        fobj.write(f"v {v[0]:.4f} {v[1]:.4f} {v[2]:.4f}\n")
-                    for f_ in faces:
-                        fobj.write(f"f {f_[0]+1} {f_[1]+1} {f_[2]+1}\n")
-                return os.path.join('results', 'meshes', 'thrombus', obj_name)
+                mz3_name = f"thrombus_{study_uuid}.mz3"
+                mz3_path = os.path.join(mesh_dir, mz3_name)
+                write_mz3(mz3_path, verts, faces)
+                return os.path.join('results', 'meshes', 'thrombus', mz3_name)
             except Exception as _e:
-                log(f"Warning: thrombus OBJ generation failed: {_e}", 'WARNING', stage='OUTPUT')
+                log(f"Warning: thrombus MZ3 generation failed: {_e}", 'WARNING', stage='OUTPUT')
                 return None
 
-        if results.get('vmtk_surface_obj') and os.path.exists(results['vmtk_surface_obj']):
+        # Save PA mesh — prefer MZ3 binary (40x smaller), fallback to OBJ
+        if results.get('vmtk_surface_mz3') and os.path.exists(results['vmtk_surface_mz3']):
+            try:
+                pa_mesh_rel = save_mesh_file(
+                    results['vmtk_surface_mz3'],
+                    'pa', f"pa_surface_{study.id}.mz3"
+                )
+                result.pa_mesh.name = pa_mesh_rel
+                log(f"VMTK PA surface mesh saved (MZ3): {pa_mesh_rel}", stage='OUTPUT')
+            except Exception as _e:
+                log(f"Warning: could not save PA mesh: {_e}", 'WARNING', stage='OUTPUT')
+        elif results.get('vmtk_surface_obj') and os.path.exists(results['vmtk_surface_obj']):
             try:
                 pa_mesh_rel = save_mesh_file(
                     results['vmtk_surface_obj'],
                     'pa', f"pa_surface_{study.id}.obj"
                 )
                 result.pa_mesh.name = pa_mesh_rel
-                log(f"VMTK PA surface mesh saved: {pa_mesh_rel}", stage='OUTPUT')
+                log(f"VMTK PA surface mesh saved (OBJ fallback): {pa_mesh_rel}", stage='OUTPUT')
             except Exception as _e:
                 log(f"Warning: could not save PA mesh: {_e}", 'WARNING', stage='OUTPUT')
 
@@ -879,15 +895,15 @@ class StudyViewSet(viewsets.ModelViewSet):
             except Exception as _e:
                 log(f"Warning: could not save centerline VTP: {_e}", 'WARNING', stage='OUTPUT')
 
-        # Generate thrombus OBJ mesh from thrombus_mask (uses skimage, no VMTK required)
+        # Generate thrombus mesh (MZ3 binary, uses skimage — no VMTK required)
         spacing_mm = tuple(metadata.get('spacing', (1.0, 1.0, 1.0)))
-        thrombus_obj_rel = generate_thrombus_obj(
+        thrombus_mz3_rel = generate_thrombus_mz3(
             results.get('thrombus_mask', np.zeros((1, 1, 1), dtype=np.uint8)),
             spacing_mm, study.id
         )
-        if thrombus_obj_rel:
-            result.thrombus_mesh.name = thrombus_obj_rel
-            log(f"Thrombus 3D mesh saved: {thrombus_obj_rel}", stage='OUTPUT')
+        if thrombus_mz3_rel:
+            result.thrombus_mesh.name = thrombus_mz3_rel
+            log(f"Thrombus 3D mesh saved (MZ3): {thrombus_mz3_rel}", stage='OUTPUT')
         
         # Save ROI heatmap (always generated - shows domain boundaries for viewer toggle)
         result.tep_roi_heatmap.name = save_nifti(results['tep_roi_heatmap'], 'roi_heatmap', affine)
